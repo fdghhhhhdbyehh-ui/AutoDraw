@@ -418,7 +418,7 @@ jobs:
               static DrawService instance;
               static List<int[]> strokes;
               static int imgW, imgH;
-              static final int MS_PER_POINT = 10;
+              static final int MS_PER_POINT = 25;
 
               WindowManager wm;
               TextView fab;
@@ -429,6 +429,7 @@ jobs:
               boolean drawing, cancel;
               float cx1, cy1;
               int taps;
+          int okCount, failCount;
 
               @Override
               protected void onServiceConnected() {
@@ -562,22 +563,42 @@ jobs:
               void beginDraw(float x1, float y1, float x2, float y2) {
                   drawing = true;
                   cancel = false;
-                  if (fab != null) fab.setText("⏹");
+                  if (fab != null) {
+                      fab.setText("⏹");
+                      int size = fabLp.width;
+                      int screenH = getResources().getDisplayMetrics().heightPixels;
+                      int ny = (int) y2 + 15;
+                      if (ny + size > screenH) ny = Math.max(0, (int) y1 - size - 15);
+                      fabLp.x = (int) x1;
+                      fabLp.y = ny;
+                      try { wm.updateViewLayout(fab, fabLp); } catch (Exception e) {}
+                  }
                   float rw = x2 - x1, rh = y2 - y1;
                   float sc = Math.min(rw / imgW, rh / imgH);
                   float ox = x1 + (rw - imgW * sc) / 2f;
                   float oy = y1 + (rh - imgH * sc) / 2f;
-                  drawNext(0, ox, oy, sc);
+                  okCount = 0;
+              failCount = 0;
+              Toast.makeText(this, "بدأ الرسم: " + strokes.size() + " خط، المنطقة " + (int) rw + "x" + (int) rh, Toast.LENGTH_LONG).show();
+              drawNext(0, ox, oy, sc);
               }
 
               void finishDraw(String msg) {
                   drawing = false;
                   cancel = false;
                   if (fab != null) fab.setText("🎨");
-                  Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+                  Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
               }
 
               void drawNext(int i, float ox, float oy, float sc) {
+              try {
+                  drawStroke(i, ox, oy, sc);
+              } catch (Exception e) {
+                  finishDraw("خطأ: " + e);
+              }
+          }
+
+          void drawStroke(int i, float ox, float oy, float sc) {
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
                   if (strokes == null || i >= strokes.size()) { finishDraw("انتهى الرسم"); return; }
                   int[] s = strokes.get(i);
@@ -586,20 +607,23 @@ jobs:
                   for (int k = 2; k < s.length; k += 2) {
                       p.lineTo(ox + s[k] * sc, oy + s[k + 1] * sc);
                   }
-                  long dur = Math.max(20, (long) (s.length / 2) * MS_PER_POINT);
+                  long dur = Math.max(120, (long) (s.length / 2) * MS_PER_POINT);
                   GestureDescription gd = new GestureDescription.Builder()
                           .addStroke(new GestureDescription.StrokeDescription(p, 0, dur))
                           .build();
                   GestureResultCallback cb = new GestureResultCallback() {
                       @Override public void onCompleted(GestureDescription g) {
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 10);
+                          okCount++;
+                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
                       }
                       @Override public void onCancelled(GestureDescription g) {
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 10);
+                          failCount++;
+                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
                       }
                   };
                   if (!dispatchGesture(gd, cb, null)) {
-                      finishDraw("تعذر تنفيذ الرسم");
+                      failCount++;
+                      h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
                   }
               }
           }
