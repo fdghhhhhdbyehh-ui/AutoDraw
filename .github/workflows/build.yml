@@ -63,7 +63,6 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET" />
               <application
                   android:label="رسام تلقائي"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
@@ -221,12 +220,6 @@ jobs:
                   // 5) تنحيف إلى بكسل واحد
                   thin(edge, w, h);
 
-                  return finish(edge, w, h, detail, res);
-              }
-
-              /** المراحل 6-8: تتبع الخطوط من هيكل بكسل واحد ثم التصفية والتبسيط والترتيب. */
-              static Result finish(boolean[] edge, int w, int h, int detail, Result res) {
-                  int n = w * h;
                   // 6) تتبع الخطوط: نبدأ من الأطراف ثم الحلقات
                   boolean[] used = new boolean[n];
                   List<IL> raw = new ArrayList<>();
@@ -275,54 +268,6 @@ jobs:
                   }
                   res.totalLen = total;
                   return res;
-              }
-
-              /** مسار الرسم الخطي (ناتج الذكاء الاصطناعي): خطوط سوداء على أبيض، فلا حاجة لكشف الحواف؛ عتبة ثم تنحيف ثم نفس التتبع. */
-              static Result traceLines(int[] argb, int w, int h, int detail) {
-                  int n = w * h;
-                  Result res = new Result();
-                  res.w = w;
-                  res.h = h;
-                  int[] hist = new int[256];
-                  float[] gray = new float[n];
-                  for (int i = 0; i < n; i++) {
-                      int c = argb[i];
-                      float a = ((c >>> 24) & 255) / 255f;
-                      float r = ((c >> 16) & 255) * a + 255f * (1 - a);
-                      float g = ((c >> 8) & 255) * a + 255f * (1 - a);
-                      float b = (c & 255) * a + 255f * (1 - a);
-                      float v = 0.299f * r + 0.587f * g + 0.114f * b;
-                      gray[i] = v;
-                      hist[Math.min(255, (int) v)]++;
-                  }
-                  long sumAll = 0;
-                  for (int t = 0; t < 256; t++) sumAll += (long) t * hist[t];
-                  long wB = 0, sumB = 0;
-                  double best = -1;
-                  int thr = 128;
-                  for (int t = 0; t < 256; t++) {
-                      wB += hist[t];
-                      if (wB == 0) continue;
-                      long wF = n - wB;
-                      if (wF == 0) break;
-                      sumB += (long) t * hist[t];
-                      double mB = (double) sumB / wB, mF = (double) (sumAll - sumB) / wF;
-                      double between = (double) wB * wF * (mB - mF) * (mB - mF);
-                      if (between > best) { best = between; thr = t; }
-                  }
-                  thr = Math.max(70, Math.min(190, thr));
-                  boolean[] edge = new boolean[n];
-                  int dark = 0;
-                  for (int i = 0; i < n; i++) {
-                      if (gray[i] < thr) { edge[i] = true; dark++; }
-                  }
-                  if (dark > n * 0.5) {
-                      for (int i = 0; i < n; i++) edge[i] = !edge[i];
-                  }
-                  for (int x = 0; x < w; x++) { edge[x] = false; edge[(h - 1) * w + x] = false; }
-                  for (int y = 0; y < h; y++) { edge[y * w] = false; edge[y * w + w - 1] = false; }
-                  thin(edge, w, h);
-                  return finish(edge, w, h, detail, res);
               }
 
               static float[] blur(float[] src, int w, int h, float sigma) {
@@ -563,436 +508,113 @@ jobs:
           }
           EOF
 
-          cat > app/src/main/java/com/autodraw/AiLines.java <<'EOF'
-          package com.autodraw;
-
-          import android.graphics.Bitmap;
-          import android.graphics.BitmapFactory;
-          import android.graphics.Canvas;
-          import android.graphics.Color;
-          import android.util.Base64;
-          import java.io.ByteArrayOutputStream;
-          import java.io.InputStream;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.URL;
-          import org.json.JSONArray;
-          import org.json.JSONObject;
-
-          /** مهمته الوحيدة: إرسال الصورة لنموذج ذكاء اصطناعي ليعيد رسماً خطياً نظيفاً (أسود على أبيض). لا يتدخل في أي شيء آخر. */
-          class AiLines {
-              static final String PROMPT = "Convert this image into a clean, accurate line drawing. "
-                      + "Output ONLY the image: thin, crisp, continuous black outlines on a pure white background. "
-                      + "Keep the exact same composition, framing, aspect ratio, proportions and positions as the original. "
-                      + "Draw only the real contours and the important inner lines. "
-                      + "Do not add, remove, move, stylize or invent anything. "
-                      + "No shading, no fills, no gray tones, no text, no border, no watermark.";
-
-              static Bitmap extract(Bitmap src, String apiKey, String model) throws Exception {
-                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                  src.compress(Bitmap.CompressFormat.JPEG, 92, bo);
-                  String b64 = Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
-
-                  JSONObject img = new JSONObject().put("mime_type", "image/jpeg").put("data", b64);
-                  JSONArray parts = new JSONArray()
-                          .put(new JSONObject().put("text", PROMPT))
-                          .put(new JSONObject().put("inline_data", img));
-                  JSONObject body = new JSONObject()
-                          .put("contents", new JSONArray().put(new JSONObject().put("parts", parts)))
-                          .put("generationConfig", new JSONObject()
-                                  .put("responseModalities", new JSONArray().put("TEXT").put("IMAGE")));
-
-                  URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
-                  HttpURLConnection c = (HttpURLConnection) url.openConnection();
-                  c.setRequestMethod("POST");
-                  c.setConnectTimeout(30000);
-                  c.setReadTimeout(120000);
-                  c.setDoOutput(true);
-                  c.setRequestProperty("Content-Type", "application/json");
-                  c.setRequestProperty("x-goog-api-key", apiKey);
-                  byte[] data = body.toString().getBytes("UTF-8");
-                  try (OutputStream os = c.getOutputStream()) {
-                      os.write(data);
-                  }
-                  int code = c.getResponseCode();
-                  InputStream is = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
-                  String resp = readAll(is);
-                  c.disconnect();
-                  if (code < 200 || code >= 300) throw new Exception("HTTP " + code + " " + shorten(resp));
-
-                  JSONObject root = new JSONObject(resp);
-                  JSONArray cands = root.optJSONArray("candidates");
-                  if (cands == null || cands.length() == 0) throw new Exception("لم يرجع النموذج نتيجة");
-                  JSONObject content = cands.getJSONObject(0).optJSONObject("content");
-                  JSONArray ps = content == null ? null : content.optJSONArray("parts");
-                  if (ps == null) throw new Exception("لم يرجع النموذج صورة");
-                  for (int i = 0; i < ps.length(); i++) {
-                      JSONObject p = ps.getJSONObject(i);
-                      JSONObject inl = p.optJSONObject("inlineData");
-                      if (inl == null) inl = p.optJSONObject("inline_data");
-                      if (inl == null) continue;
-                      String d = inl.optString("data", "");
-                      if (d.length() == 0) continue;
-                      byte[] bytes = Base64.decode(d, Base64.DEFAULT);
-                      Bitmap bm = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                      if (bm == null) continue;
-                      Bitmap flat = Bitmap.createBitmap(bm.getWidth(), bm.getHeight(), Bitmap.Config.ARGB_8888);
-                      Canvas cv = new Canvas(flat);
-                      cv.drawColor(Color.WHITE);
-                      cv.drawBitmap(bm, 0, 0, null);
-                      return flat;
-                  }
-                  throw new Exception("لم يرجع النموذج صورة");
-              }
-
-              static String readAll(InputStream is) throws Exception {
-                  if (is == null) return "";
-                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                  byte[] buf = new byte[8192];
-                  int n;
-                  while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
-                  is.close();
-                  return bo.toString("UTF-8");
-              }
-
-              static String shorten(String s) {
-                  if (s == null) return "";
-                  s = s.replace('\n', ' ');
-                  return s.length() > 160 ? s.substring(0, 160) : s;
-              }
-          }
-          EOF
-
           cat > app/src/main/java/com/autodraw/MainActivity.java <<'EOF'
           package com.autodraw;
 
           import android.app.Activity;
           import android.content.Intent;
-          import android.content.SharedPreferences;
-          import android.content.res.ColorStateList;
           import android.graphics.Bitmap;
           import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.Paint;
-          import android.graphics.Typeface;
-          import android.graphics.drawable.GradientDrawable;
-          import android.graphics.drawable.StateListDrawable;
           import android.net.Uri;
           import android.os.Bundle;
           import android.provider.Settings;
-          import android.text.InputType;
-          import android.view.Gravity;
-          import android.view.View;
           import android.view.ViewGroup;
           import android.widget.Button;
-          import android.widget.EditText;
+          import android.widget.CheckBox;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
-          import android.widget.ScrollView;
           import android.widget.SeekBar;
-          import android.widget.Switch;
           import android.widget.TextView;
           import android.widget.Toast;
           import java.io.InputStream;
-          import java.util.Locale;
 
           public class MainActivity extends Activity {
-              static final String DEFAULT_MODEL = "gemini-2.5-flash-image";
-              static final int BLUE = 0xFF007AFF;
-              static final int INK = 0xFF1C1C1E;
-
               int[] pixels;
               int pw, ph;
               Tracer.Result result;
               ImageView preview;
               TextView info, speedLabel;
               SeekBar detail, speed;
-              Switch humanSwitch, aiSwitch;
-              EditText keyEdit, modelEdit;
-              SharedPreferences prefs;
+              CheckBox humanBox;
               int jobId = 0;
-
-              // الذكاء الاصطناعي (استخراج الخطوط فقط)
-              Bitmap aiInput;
-              int[] aiPixels;
-              int aiW, aiH;
-              String aiError;
-              String aiStatus = "";
-              boolean aiBusy, again;
-              int imgGen = 0;
-
-              int dp(float v) {
-                  return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
-              }
-
-              GradientDrawable glass(float radiusDp, int top, int bottom, int stroke) {
-                  GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{top, bottom});
-                  g.setCornerRadius(dp(radiusDp));
-                  if (stroke != 0) g.setStroke(dp(1), stroke);
-                  return g;
-              }
-
-              LinearLayout card() {
-                  LinearLayout c = new LinearLayout(this);
-                  c.setOrientation(LinearLayout.VERTICAL);
-                  c.setBackground(glass(24, 0xAAFFFFFF, 0x55FFFFFF, 0xCCFFFFFF));
-                  c.setPadding(dp(16), dp(14), dp(16), dp(14));
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                  lp.bottomMargin = dp(12);
-                  c.setLayoutParams(lp);
-                  return c;
-              }
-
-              Button btn(String text, boolean primary) {
-                  Button b = new Button(this);
-                  b.setText(text);
-                  b.setAllCaps(false);
-                  b.setStateListAnimator(null);
-                  b.setTextSize(16);
-                  b.setTypeface(Typeface.DEFAULT_BOLD);
-                  b.setTextColor(primary ? Color.WHITE : BLUE);
-                  b.setPadding(dp(16), 0, dp(16), 0);
-                  GradientDrawable normal = primary
-                          ? glass(18, 0xFF4DA8FF, 0xFF007AFF, 0x88FFFFFF)
-                          : glass(18, 0xBBFFFFFF, 0x66FFFFFF, 0xDDFFFFFF);
-                  GradientDrawable pressed = primary
-                          ? glass(18, 0xFF2F8BEB, 0xFF0062CC, 0x88FFFFFF)
-                          : glass(18, 0x88FFFFFF, 0x44FFFFFF, 0xDDFFFFFF);
-                  StateListDrawable sl = new StateListDrawable();
-                  sl.addState(new int[]{android.R.attr.state_pressed}, pressed);
-                  sl.addState(new int[]{}, normal);
-                  b.setBackground(sl);
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-                  lp.bottomMargin = dp(10);
-                  b.setLayoutParams(lp);
-                  return b;
-              }
-
-              TextView label(String t) {
-                  TextView v = new TextView(this);
-                  v.setText(t);
-                  v.setTextColor(INK);
-                  v.setTextSize(15);
-                  v.setTypeface(Typeface.DEFAULT_BOLD);
-                  v.setTextDirection(View.TEXT_DIRECTION_RTL);
-                  v.setGravity(Gravity.RIGHT);
-                  v.setPadding(0, dp(4), 0, dp(2));
-                  return v;
-              }
-
-              TextView note(String t) {
-                  TextView v = label(t);
-                  v.setTextSize(12);
-                  v.setTypeface(Typeface.DEFAULT);
-                  v.setTextColor(0x99000000);
-                  return v;
-              }
-
-              void styleSeek(SeekBar s) {
-                  s.setProgressTintList(ColorStateList.valueOf(BLUE));
-                  s.setThumbTintList(ColorStateList.valueOf(BLUE));
-                  s.setProgressBackgroundTintList(ColorStateList.valueOf(0x33000000));
-              }
-
-              Switch toggle(String text, boolean on) {
-                  Switch sw = new Switch(this);
-                  sw.setText(text);
-                  sw.setTextColor(INK);
-                  sw.setTextSize(15);
-                  sw.setTextDirection(View.TEXT_DIRECTION_RTL);
-                  sw.setChecked(on);
-                  int[][] st = {{android.R.attr.state_checked}, {}};
-                  sw.setTrackTintList(new ColorStateList(st, new int[]{0xFF34C759, 0x55787880}));
-                  sw.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
-                  sw.setPadding(0, dp(8), 0, dp(8));
-                  return sw;
-              }
-
-              EditText edit(String hint, boolean password) {
-                  EditText e = new EditText(this);
-                  e.setHint(hint);
-                  e.setSingleLine(true);
-                  e.setTextSize(14);
-                  e.setTextColor(INK);
-                  e.setHintTextColor(0x66000000);
-                  e.setBackground(glass(14, 0xCCFFFFFF, 0x88FFFFFF, 0xDDFFFFFF));
-                  e.setPadding(dp(12), dp(10), dp(12), dp(10));
-                  if (password) e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                  lp.topMargin = dp(6);
-                  e.setLayoutParams(lp);
-                  return e;
-              }
 
               @Override
               protected void onCreate(Bundle s) {
                   super.onCreate(s);
-                  prefs = getSharedPreferences("autodraw", MODE_PRIVATE);
-                  getWindow().setStatusBarColor(Color.TRANSPARENT);
-                  getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                          new int[]{0xFFD9E7FF, 0xFFEADCFB, 0xFFFFE2EC}));
+                  root.setPadding(40, 70, 40, 30);
 
-                  ScrollView sv = new ScrollView(this);
-                  sv.setVerticalScrollBarEnabled(false);
-                  LinearLayout col = new LinearLayout(this);
-                  col.setOrientation(LinearLayout.VERTICAL);
-                  col.setPadding(dp(18), dp(56), dp(18), dp(8));
-                  sv.addView(col);
+                  TextView ver = new TextView(this);
+                  ver.setText("الإصدار 8");
 
-                  TextView title = new TextView(this);
-                  title.setText("رسام تلقائي");
-                  title.setTextSize(30);
-                  title.setTypeface(Typeface.DEFAULT_BOLD);
-                  title.setTextColor(INK);
-                  title.setGravity(Gravity.RIGHT);
-                  TextView ver = note("الإصدار 8");
-
-                  Button b1 = btn("1) تفعيل خدمة الرسم", false);
+                  Button b1 = new Button(this);
+                  b1.setText("1) تفعيل خدمة الرسم");
                   b1.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
 
-                  Button b2 = btn("2) اختيار صورة", false);
+                  Button b2 = new Button(this);
+                  b2.setText("2) اختيار صورة");
                   b2.setOnClickListener(v -> {
                       Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                       i.setType("image/*");
                       startActivityForResult(i, 1);
                   });
 
-                  // --- بطاقة الإعدادات ---
-                  LinearLayout c1 = card();
+                  TextView t1 = new TextView(this);
+                  t1.setText("مستوى التفاصيل:");
                   detail = new SeekBar(this);
                   detail.setMax(100);
                   detail.setProgress(55);
-                  styleSeek(detail);
                   detail.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                       @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {}
                       @Override public void onStartTrackingTouch(SeekBar sb) {}
                       @Override public void onStopTrackingTouch(SeekBar sb) { process(); }
                   });
-                  speedLabel = label("");
+
+                  speedLabel = new TextView(this);
                   speed = new SeekBar(this);
                   speed.setMax(100);
-                  speed.setProgress(77);
-                  styleSeek(speed);
+                  speed.setProgress(25);
                   speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                       @Override public void onProgressChanged(SeekBar sb, int p, boolean user) { updateInfo(); }
                       @Override public void onStartTrackingTouch(SeekBar sb) {}
                       @Override public void onStopTrackingTouch(SeekBar sb) {}
                   });
-                  humanSwitch = toggle("رسم بشري (سرعة متغيّرة وتوقفات طبيعية)", true);
-                  c1.addView(label("مستوى التفاصيل"));
-                  c1.addView(detail);
-                  c1.addView(speedLabel);
-                  c1.addView(speed);
-                  c1.addView(humanSwitch);
 
-                  // --- بطاقة الذكاء الاصطناعي ---
-                  LinearLayout c2 = card();
-                  aiSwitch = toggle("✨ تحسين استخراج الخطوط بالذكاء الاصطناعي", prefs.getBoolean("ai", false));
-                  keyEdit = edit("مفتاح Gemini API", true);
-                  keyEdit.setText(prefs.getString("key", ""));
-                  modelEdit = edit("اسم النموذج", false);
-                  modelEdit.setText(prefs.getString("model", DEFAULT_MODEL));
-                  Button retry = btn("إعادة تحليل الصورة", false);
-                  retry.setTextSize(14);
-                  retry.setLayoutParams(rowLp(44, 10));
-                  retry.setOnClickListener(v -> {
-                      aiPixels = null;
-                      aiError = null;
-                      process();
-                  });
-                  aiSwitch.setOnCheckedChangeListener((bv, on) -> {
-                      aiError = null;
-                      process();
-                  });
-                  c2.addView(aiSwitch);
-                  c2.addView(keyEdit);
-                  c2.addView(modelEdit);
-                  c2.addView(retry);
-                  c2.addView(note("الذكاء الاصطناعي يستخرج الخطوط فقط؛ المعايرة والرسم والسرعة تبقى كما هي. عند التفعيل تُرسل الصورة إلى Google."));
+                  humanBox = new CheckBox(this);
+                  humanBox.setText("رسم بشري (سرعة متغيّرة وتوقفات طبيعية)");
+                  humanBox.setChecked(true);
 
                   preview = new ImageView(this);
-                  preview.setBackground(glass(22, 0xFFFFFFFF, 0xFFFFFFFF, 0xCCFFFFFF));
-                  preview.setClipToOutline(true);
-                  preview.setPadding(dp(6), dp(6), dp(6), dp(6));
+                  preview.setBackgroundColor(Color.WHITE);
                   preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                  LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, dp(300));
-                  plp.bottomMargin = dp(8);
-                  preview.setLayoutParams(plp);
 
-                  info = note("");
-                  info.setTextSize(13);
+                  info = new TextView(this);
 
-                  col.addView(title);
-                  col.addView(ver);
-                  col.addView(b1);
-                  col.addView(b2);
-                  col.addView(c1);
-                  col.addView(c2);
-                  col.addView(preview);
-                  col.addView(info);
-
-                  Button b3 = btn("3) ابدأ", true);
+                  Button b3 = new Button(this);
+                  b3.setText("3) ابدأ");
                   b3.setOnClickListener(v -> start());
-                  LinearLayout bottom = new LinearLayout(this);
-                  bottom.setOrientation(LinearLayout.VERTICAL);
-                  bottom.setPadding(dp(18), dp(6), dp(18), dp(18));
-                  bottom.addView(b3);
 
-                  root.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-                  root.addView(bottom, new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  root.addView(ver);
+                  root.addView(b1);
+                  root.addView(b2);
+                  root.addView(t1);
+                  root.addView(detail);
+                  root.addView(speedLabel);
+                  root.addView(speed);
+                  root.addView(humanBox);
+                  root.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+                  root.addView(info);
+                  root.addView(b3);
                   setContentView(root);
                   updateInfo();
               }
 
-              LinearLayout.LayoutParams rowLp(int hDp, int bottomDp) {
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, dp(hDp));
-                  lp.topMargin = dp(8);
-                  lp.bottomMargin = dp(bottomDp);
-                  return lp;
-              }
-
-              @Override
-              protected void onPause() {
-                  super.onPause();
-                  saveSettings();
-              }
-
-              void saveSettings() {
-                  String k = keyEdit.getText().toString().trim();
-                  String m = modelEdit.getText().toString().trim();
-                  if (m.isEmpty()) m = DEFAULT_MODEL;
-                  String ok = prefs.getString("key", "");
-                  String om = prefs.getString("model", DEFAULT_MODEL);
-                  if (!k.equals(ok) || !m.equals(om)) {
-                      aiPixels = null;
-                      aiError = null;
-                  }
-                  prefs.edit().putString("key", k).putString("model", m).putBoolean("ai", aiSwitch.isChecked()).apply();
-              }
-
-              /** سرعة بطيئة جداً حتى 5 بكسل/ث وسريعة حتى 450 (تدرّج أُسّي: الجزء الأيسر من الشريط دقيق جداً). */
               float currentSpeed() {
-                  return 5f * (float) Math.pow(90.0, speed.getProgress() / 100.0);
-              }
-
-              String speedName(float sp) {
-                  if (sp < 12f) return "بطيء جداً جداً";
-                  if (sp < 30f) return "بطيء جداً";
-                  if (sp < 80f) return "بطيء";
-                  if (sp < 200f) return "متوسط";
-                  return "سريع";
+                  return 60f + speed.getProgress() * 4f;
               }
 
               @Override
@@ -1001,17 +623,6 @@ jobs:
                   if (rc == 1 && res == RESULT_OK && data != null && data.getData() != null) {
                       load(data.getData());
                   }
-              }
-
-              Bitmap flatten(Bitmap src, float k) {
-                  int w = Math.max(16, (int) (src.getWidth() * k));
-                  int h = Math.max(16, (int) (src.getHeight() * k));
-                  Bitmap scaled = Bitmap.createScaledBitmap(src, w, h, true);
-                  Bitmap flat = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                  Canvas c = new Canvas(flat);
-                  c.drawColor(Color.WHITE);
-                  c.drawBitmap(scaled, 0, 0, null);
-                  return flat;
               }
 
               void load(Uri uri) {
@@ -1029,19 +640,16 @@ jobs:
                       try (InputStream in = getContentResolver().openInputStream(uri)) {
                           full = BitmapFactory.decodeStream(in, null, o);
                       }
-                      int m = Math.max(full.getWidth(), full.getHeight());
-                      Bitmap flat = flatten(full, Math.min(3f, 720f / m));
-                      pw = flat.getWidth();
-                      ph = flat.getHeight();
+                      float k = Math.min(3f, 720f / Math.max(full.getWidth(), full.getHeight()));
+                      pw = Math.max(16, (int) (full.getWidth() * k));
+                      ph = Math.max(16, (int) (full.getHeight() * k));
+                      Bitmap scaled = Bitmap.createScaledBitmap(full, pw, ph, true);
+                      Bitmap flat = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888);
+                      Canvas c = new Canvas(flat);
+                      c.drawColor(Color.WHITE);
+                      c.drawBitmap(scaled, 0, 0, null);
                       pixels = new int[pw * ph];
                       flat.getPixels(pixels, 0, pw, 0, 0, pw, ph);
-                      aiInput = flatten(full, Math.min(1f, 1024f / m));
-                      imgGen++;
-                      aiPixels = null;
-                      aiError = null;
-                      aiStatus = "";
-                      aiBusy = false;
-                      again = false;
                       process();
                   } catch (Exception e) {
                       Toast.makeText(this, "تعذر فتح الصورة", Toast.LENGTH_SHORT).show();
@@ -1050,79 +658,24 @@ jobs:
 
               void process() {
                   if (pixels == null) return;
-                  if (aiBusy) { again = true; return; }
-                  saveSettings();
                   final int id = ++jobId;
-                  final int gen = imgGen;
                   final int d = detail.getProgress();
                   final int[] px = pixels;
                   final int w = pw, h = ph;
-                  final boolean useAi = aiSwitch.isChecked();
-                  final String key = keyEdit.getText().toString().trim();
-                  String mm = modelEdit.getText().toString().trim();
-                  final String model = mm.isEmpty() ? DEFAULT_MODEL : mm;
-                  final Bitmap src = aiInput;
-                  final String cachedErr = aiError;
-                  final int[] cachedPx = aiPixels;
-                  final int cw = aiW, ch = aiH;
-                  final boolean needAi = useAi && key.length() > 0 && cachedPx == null && cachedErr == null && src != null;
-                  if (needAi) aiBusy = true;
-                  info.setText(needAi ? "جارٍ تحليل الصورة بالذكاء الاصطناعي..." : "جارٍ استخراج الخطوط...");
+                  info.setText("جارٍ استخراج الخطوط...");
                   new Thread(() -> {
                       try {
-                          int[] ap = cachedPx;
-                          int aw = cw, ah = ch;
-                          String err = cachedErr;
-                          if (needAi) {
-                              try {
-                                  Bitmap line = AiLines.extract(src, key, model);
-                                  aw = line.getWidth();
-                                  ah = line.getHeight();
-                                  ap = new int[aw * ah];
-                                  line.getPixels(ap, 0, aw, 0, 0, aw, ah);
-                              } catch (Throwable t) {
-                                  err = String.valueOf(t);
-                              }
-                          }
-                          Tracer.Result r = null;
-                          boolean usedAi = false;
-                          if (useAi && ap != null) {
-                              r = Tracer.traceLines(ap, aw, ah, d);
-                              usedAi = !r.strokes.isEmpty();
-                              if (!usedAi && err == null) err = "الصورة الناتجة لا تحتوي خطوطاً";
-                          }
-                          if (!usedAi) r = Tracer.trace(px, w, h, d);
-                          String st = "";
-                          if (useAi) {
-                              if (key.length() == 0) st = "أدخل مفتاح API لتفعيل الذكاء الاصطناعي";
-                              else if (usedAi) st = "✨ الخطوط مستخرجة بالذكاء الاصطناعي";
-                              else st = "تعذر الذكاء الاصطناعي واستُخدمت الطريقة العادية: " + AiLines.shorten(err);
-                          }
-                          final Tracer.Result fr = r;
+                          final Tracer.Result r = Tracer.trace(px, w, h, d);
                           final Bitmap pv = render(r);
-                          final int[] fap = ap;
-                          final int faw = aw, fah = ah;
-                          final String ferr = err, fst = st;
                           runOnUiThread(() -> {
-                              if (gen != imgGen) return;
-                              if (fap != null) { aiPixels = fap; aiW = faw; aiH = fah; }
-                              aiError = ferr;
-                              if (needAi) {
-                                  aiBusy = false;
-                                  if (again) { again = false; process(); return; }
-                              }
                               if (id != jobId) return;
-                              result = fr;
-                              aiStatus = fst;
+                              result = r;
                               preview.setImageBitmap(pv);
                               updateInfo();
                           });
                       } catch (Throwable t) {
                           final String msg = String.valueOf(t);
-                          runOnUiThread(() -> {
-                              if (gen == imgGen && needAi) aiBusy = false;
-                              info.setText("خطأ: " + msg);
-                          });
+                          runOnUiThread(() -> info.setText("خطأ: " + msg));
                       }
                   }).start();
               }
@@ -1147,20 +700,11 @@ jobs:
 
               void updateInfo() {
                   float sp = currentSpeed();
-                  String num = sp < 10f ? String.format(Locale.US, "%.1f", sp) : String.valueOf((int) sp);
-                  speedLabel.setText("سرعة الرسم: " + speedName(sp) + " (" + num + " بكسل/ث)");
-                  if (result == null) {
-                      info.setText(aiStatus);
-                      return;
-                  }
+                  speedLabel.setText("سرعة الرسم: " + (int) sp + " بكسل/ثانية  (الأقل = أبطأ)");
+                  if (result == null) return;
                   int secs = (int) (result.totalLen * 1.5f / sp);
-                  String t;
-                  if (secs >= 3600) t = (secs / 3600) + " ساعة و " + ((secs % 3600) / 60) + " دقيقة تقريباً";
-                  else if (secs >= 60) t = (secs / 60) + " دقيقة تقريباً";
-                  else t = secs + " ثانية تقريباً";
-                  String s = "عدد الخطوط: " + result.strokes.size() + "  |  الزمن: " + t;
-                  if (aiStatus.length() > 0) s += "\n" + aiStatus;
-                  info.setText(s);
+                  String t = secs >= 60 ? (secs / 60) + " دقيقة تقريباً" : secs + " ثانية تقريباً";
+                  info.setText("عدد الخطوط: " + result.strokes.size() + "  |  الزمن: " + t);
               }
 
               void start() {
@@ -1177,7 +721,7 @@ jobs:
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
                   DrawService.speed = currentSpeed();
-                  DrawService.human = humanSwitch.isChecked();
+                  DrawService.human = humanBox.isChecked();
                   DrawService.instance.showFab();
                   Toast.makeText(this, "افتح اللعبة ثم اضغط زر 🎨", Toast.LENGTH_LONG).show();
                   moveTaskToBack(true);
@@ -1190,11 +734,18 @@ jobs:
 
           import android.accessibilityservice.AccessibilityService;
           import android.accessibilityservice.GestureDescription;
+          import android.content.Context;
           import android.content.Intent;
+          import android.content.res.ColorStateList;
+          import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.Paint;
           import android.graphics.Path;
           import android.graphics.PixelFormat;
+          import android.graphics.RectF;
+          import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.LayerDrawable;
           import android.os.Handler;
           import android.os.Looper;
           import android.view.Gravity;
@@ -1204,11 +755,14 @@ jobs:
           import android.view.WindowManager;
           import android.view.accessibility.AccessibilityEvent;
           import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.SeekBar;
           import android.widget.TextView;
           import android.widget.Toast;
           import java.util.ArrayList;
           import java.util.Arrays;
           import java.util.List;
+          import java.util.Locale;
           import java.util.Random;
 
           public class DrawService extends AccessibilityService {
@@ -1221,22 +775,25 @@ jobs:
               static class Piece {
                   float[] pts;
                   long dur;
-                  long pause;
+                  long pause; // عشوائية بشرية تُضاف فوق مدة التأخير التي يحددها المستخدم
               }
               List<Piece> plan;
 
               WindowManager wm;
               TextView fab;
               WindowManager.LayoutParams fabLp;
-              FrameLayout calib;
-              TextView calibText;
+              LinearLayout menu;
+              FrameLayout regionOverlay;
+              RegionView regionView;
               View frame;
               Runnable pendingBegin;
               final Handler h = new Handler(Looper.getMainLooper());
-              boolean drawing, cancel;
-              float cx1, cy1;
-              int taps;
+
+              boolean drawing, cancel, paused, loopWaiting;
+              int resumeIdx;
               int okCount, failCount;
+              int delayMs = 150;      // التأخير بين الضغطات (ملي ثانية)
+              RectF region;           // موقع الرسمة المحدد (إحداثيات الشاشة)
 
               @Override
               protected void onServiceConnected() {
@@ -1254,12 +811,57 @@ jobs:
                   return super.onUnbind(i);
               }
 
+              int dp(float v) {
+                  return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              // ============ ستايل زجاجي (Liquid Glass) ============
+              Drawable glass(float radius, boolean strong, int sheenBottomInset) {
+                  GradientDrawable base = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                          strong ? new int[]{0xB8363644, 0x9C1E1E28} : new int[]{0x45FFFFFF, 0x1FFFFFFF});
+                  base.setCornerRadius(radius);
+                  base.setStroke(Math.max(1, dp(1)), 0x70FFFFFF);
+                  GradientDrawable sheen = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{0x42FFFFFF, 0x00FFFFFF});
+                  sheen.setCornerRadius(radius);
+                  LayerDrawable ld = new LayerDrawable(new Drawable[]{base, sheen});
+                  ld.setLayerInset(1, dp(2), dp(2), dp(2), sheenBottomInset);
+                  return ld;
+              }
+
+              TextView btn(String text, int color) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextColor(color);
+                  t.setTextSize(14);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(8), dp(12), dp(8), dp(12));
+                  t.setBackground(glass(dp(16), false, dp(8)));
+                  t.setClickable(true);
+                  t.setOnTouchListener((v, e) -> {
+                      int a = e.getAction();
+                      if (a == MotionEvent.ACTION_DOWN) v.setAlpha(0.55f);
+                      else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) v.setAlpha(1f);
+                      return false;
+                  });
+                  return t;
+              }
+
+              LinearLayout.LayoutParams lpw(float weight, int l, int t, int r, int b) {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          weight > 0 ? 0 : ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT, weight);
+                  p.setMargins(l, t, r, b);
+                  return p;
+              }
+
+              // ============ إدارة النوافذ ============
               void hideAll() {
                   removeFrame();
+                  closeMenu();
+                  removeRegionOverlay();
                   try { if (fab != null) wm.removeView(fab); } catch (Exception e) {}
-                  try { if (calib != null) wm.removeView(calib); } catch (Exception e) {}
                   fab = null;
-                  calib = null;
               }
 
               void removeFrame() {
@@ -1278,14 +880,10 @@ jobs:
                   fab = new TextView(this);
                   fab.setText("🎨");
                   fab.setTextSize(26);
-                  fab.setGravity(Gravity.CENTER);
-                  GradientDrawable bg = new GradientDrawable();
-                  bg.setShape(GradientDrawable.OVAL);
-                  bg.setColors(new int[]{0xCC5AB0FF, 0xCC007AFF});
-                  bg.setStroke(3, 0xAAFFFFFF);
                   fab.setTextColor(Color.WHITE);
-                  fab.setBackground(bg);
-                  int size = (int) (56 * getResources().getDisplayMetrics().density);
+                  fab.setGravity(Gravity.CENTER);
+                  fab.setBackground(glass(dp(100), true, dp(26)));
+                  int size = dp(58);
                   fabLp = new WindowManager.LayoutParams(size, size,
                           WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                           WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
@@ -1307,6 +905,7 @@ jobs:
                                   ox = fabLp.x;
                                   oy = fabLp.y;
                                   moved = false;
+                                  fab.setAlpha(0.7f);
                                   return true;
                               case MotionEvent.ACTION_MOVE:
                                   if (!moved && Math.abs(e.getRawX() - sx) + Math.abs(e.getRawY() - sy) > 20) moved = true;
@@ -1314,10 +913,15 @@ jobs:
                                       fabLp.x = (int) (ox + e.getRawX() - sx);
                                       fabLp.y = (int) (oy + e.getRawY() - sy);
                                       wm.updateViewLayout(fab, fabLp);
+                                      if (menu != null) closeMenu();
                                   }
                                   return true;
                               case MotionEvent.ACTION_UP:
+                                  fab.setAlpha(1f);
                                   if (!moved) onFabClick();
+                                  return true;
+                              case MotionEvent.ACTION_CANCEL:
+                                  fab.setAlpha(1f);
                                   return true;
                           }
                           return false;
@@ -1326,45 +930,328 @@ jobs:
                   wm.addView(fab, fabLp);
               }
 
+              // ============ الضغط على الزر العائم ============
               void onFabClick() {
-                  if (drawing) {
-                      cancel = true;
-                  } else if (pendingBegin != null) {
+                  if (pendingBegin != null) {
                       h.removeCallbacks(pendingBegin);
                       pendingBegin = null;
                       removeFrame();
                       setFab("🎨", 26);
-                  } else if (calib == null) {
-                      startCalibration();
+                      return;
+                  }
+                  if (menu != null) { closeMenu(); return; }
+                  if (regionOverlay != null) return;
+                  // فتح القائمة أثناء الرسم يوقفه مؤقتاً حتى لا تصطدم لمسات الرسم بالقائمة
+                  if (drawing && !paused) {
+                      paused = true;
+                      setFab("⏸", 24);
+                  }
+                  openMenu();
+              }
+
+              // ============ القائمة العائمة ============
+              String delayText(int ms) {
+                  return "⏱ التأخير بين الضغطات: " + String.format(Locale.US, "%.2f", ms / 1000f) + " ث";
+              }
+
+              void openMenu() {
+                  if (menu != null || fab == null) return;
+                  final LinearLayout m = new LinearLayout(this);
+                  m.setOrientation(LinearLayout.VERTICAL);
+                  m.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  m.setPadding(dp(14), dp(14), dp(14), dp(14));
+                  m.setBackground(glass(dp(28), true, dp(60)));
+
+                  // 1) تشغيل / إكمال  +  إيقاف مؤقت
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  TextView play = btn((drawing && paused) ? "▶ إكمال الرسم" : "▶ تشغيل الرسم", 0xFF30D158);
+                  TextView pause = btn("⏸ إيقاف مؤقت", 0xFFFFD60A);
+                  play.setOnClickListener(v -> onPlay());
+                  pause.setOnClickListener(v -> onPause());
+                  row.addView(play, lpw(1f, dp(3), 0, dp(3), 0));
+                  row.addView(pause, lpw(1f, dp(3), 0, dp(3), 0));
+                  m.addView(row, lpw(0, 0, 0, 0, 0));
+
+                  if (drawing) {
+                      TextView stop = btn("⏹ إنهاء الرسم", 0xFFFF453A);
+                      stop.setOnClickListener(v -> onStop());
+                      m.addView(stop, lpw(0, dp(3), dp(8), dp(3), 0));
+                  }
+
+                  // 2) مدة التأخير بين الضغطات
+                  final TextView dl = new TextView(this);
+                  dl.setTextColor(Color.WHITE);
+                  dl.setTextSize(13);
+                  dl.setText(delayText(delayMs));
+                  dl.setPadding(dp(4), dp(14), dp(4), dp(2));
+                  m.addView(dl, lpw(0, 0, 0, 0, 0));
+                  SeekBar sb = new SeekBar(this);
+                  sb.setMax(60); // 0 → 3 ثوانٍ بخطوة 50 مللي ثانية
+                  sb.setProgress(delayMs / 50);
+                  sb.setProgressTintList(ColorStateList.valueOf(0xFF0A84FF));
+                  sb.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+                  sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar s, int p, boolean user) {
+                          delayMs = p * 50;
+                          dl.setText(delayText(delayMs));
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar s) {}
+                      @Override public void onStopTrackingTouch(SeekBar s) {}
+                  });
+                  m.addView(sb, lpw(0, 0, 0, 0, 0));
+
+                  // 3) تحديد موقع الرسمة
+                  TextView loc = btn("📐 تحديد موقع الرسمة" + (region != null ? "  ✓" : ""), Color.WHITE);
+                  loc.setOnClickListener(v -> {
+                      if (drawing) {
+                          Toast.makeText(this, "أنهِ الرسم الحالي أولاً", Toast.LENGTH_SHORT).show();
+                          return;
+                      }
+                      closeMenu();
+                      openRegionSelector();
+                  });
+                  m.addView(loc, lpw(0, dp(3), dp(10), dp(3), 0));
+
+                  // إغلاق عند الضغط خارج القائمة (إلا على الزر نفسه)
+                  m.setOnTouchListener((v, e) -> {
+                      if (e.getAction() == MotionEvent.ACTION_OUTSIDE) {
+                          float rx = e.getRawX(), ry = e.getRawY();
+                          boolean onFab = fabLp != null && rx >= fabLp.x && rx <= fabLp.x + fabLp.width
+                                  && ry >= fabLp.y && ry <= fabLp.y + fabLp.height;
+                          if (!onFab) closeMenu();
+                          return true;
+                      }
+                      return false;
+                  });
+
+                  int mw = dp(300);
+                  m.measure(View.MeasureSpec.makeMeasureSpec(mw, View.MeasureSpec.EXACTLY),
+                          View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+                  int mh = m.getMeasuredHeight();
+                  int sw = getResources().getDisplayMetrics().widthPixels;
+                  int sh = getResources().getDisplayMetrics().heightPixels;
+                  int x = Math.max(dp(8), Math.min(sw - mw - dp(8), fabLp.x + fabLp.width / 2 - mw / 2));
+                  int y = fabLp.y + fabLp.height + dp(10);
+                  if (y + mh > sh - dp(8)) y = fabLp.y - mh - dp(10);
+                  if (y < dp(8)) y = dp(8);
+
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(mw, ViewGroup.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                  | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                          PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.LEFT;
+                  lp.x = x;
+                  lp.y = y;
+                  try {
+                      wm.addView(m, lp);
+                      menu = m;
+                  } catch (Exception e) {
+                      menu = null;
                   }
               }
 
-              void startCalibration() {
-                  if (strokes == null || strokes.isEmpty()) return;
-                  setFab("🎨", 26);
-                  taps = 0;
-                  calib = new FrameLayout(this);
-                  calib.setBackgroundColor(0x55000000);
-                  calibText = new TextView(this);
-                  calibText.setTextColor(Color.WHITE);
-                  calibText.setTextSize(18);
-                  calibText.setGravity(Gravity.CENTER);
-                  GradientDrawable cbg = new GradientDrawable();
-                  cbg.setColor(0xCC1C1C1E);
-                  cbg.setCornerRadius(40);
-                  cbg.setStroke(2, 0x66FFFFFF);
-                  calibText.setBackground(cbg);
-                  calibText.setPadding(30, 30, 30, 30);
-                  calibText.setText("اضغط على الزاوية العلوية اليسرى للوحة الرسم");
-                  FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT,
-                          ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
-                  clp.setMargins(40, 90, 40, 0);
-                  calib.addView(calibText, clp);
-                  calib.setOnTouchListener((v, e) -> {
-                      if (e.getAction() == MotionEvent.ACTION_UP) onCalibTap(e.getRawX(), e.getRawY());
-                      return true;
+              void closeMenu() {
+                  try { if (menu != null) wm.removeView(menu); } catch (Exception e) {}
+                  menu = null;
+              }
+
+              // ============ أوامر القائمة ============
+              void onPlay() {
+                  if (drawing) {
+                      closeMenu();
+                      if (paused) {
+                          paused = false;
+                          setFab("✎", 22);
+                          if (loopWaiting) {
+                              loopWaiting = false;
+                              drawNext(resumeIdx);
+                          }
+                      }
+                      return;
+                  }
+                  if (strokes == null || strokes.isEmpty()) {
+                      Toast.makeText(this, "اختر صورة من التطبيق أولاً", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  closeMenu();
+                  if (region == null) {
+                      Toast.makeText(this, "حدد موقع الرسمة أولاً", Toast.LENGTH_SHORT).show();
+                      openRegionSelector();
+                      return;
+                  }
+                  prepareStart();
+              }
+
+              void onPause() {
+                  if (!drawing) {
+                      Toast.makeText(this, "لا يوجد رسم قيد التنفيذ", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  paused = true;
+                  setFab("⏸", 24);
+                  closeMenu();
+              }
+
+              void onStop() {
+                  closeMenu();
+                  cancel = true;
+                  if (loopWaiting) {
+                      loopWaiting = false;
+                      finishDraw("تم الإيقاف");
+                  }
+              }
+
+              // ============ تحديد موقع الرسمة ============
+              class RegionView extends View {
+                  final RectF r = new RectF();
+                  final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  final Paint hFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  final Paint hLine = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  final float min = dp(80);
+                  final float hitR = dp(44);
+                  final float hr = dp(11);
+                  final int sw = getResources().getDisplayMetrics().widthPixels;
+                  final int sh = getResources().getDisplayMetrics().heightPixels;
+                  int drag = -1; // 0=يسار-أعلى 1=يمين-أعلى 2=يمين-أسفل 3=يسار-أسفل 4=تحريك
+                  float lx, ly;
+
+                  RegionView(Context c, RectF init) {
+                      super(c);
+                      r.set(init);
+                      fill.setColor(0x26FFFFFF);
+                      line.setColor(0xFF0A84FF);
+                      line.setStyle(Paint.Style.STROKE);
+                      line.setStrokeWidth(dp(2.5f));
+                      hFill.setColor(Color.WHITE);
+                      hLine.setColor(0xFF0A84FF);
+                      hLine.setStyle(Paint.Style.STROKE);
+                      hLine.setStrokeWidth(dp(3));
+                  }
+
+                  float[] corner(int i) {
+                      switch (i) {
+                          case 0: return new float[]{r.left, r.top};
+                          case 1: return new float[]{r.right, r.top};
+                          case 2: return new float[]{r.right, r.bottom};
+                          default: return new float[]{r.left, r.bottom};
+                      }
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas cv) {
+                      int[] loc = new int[2];
+                      getLocationOnScreen(loc);
+                      cv.translate(-loc[0], -loc[1]);
+                      cv.drawRect(r, fill);
+                      cv.drawRect(r, line);
+                      for (int i = 0; i < 4; i++) {
+                          float[] c = corner(i);
+                          cv.drawCircle(c[0], c[1], hr, hFill);
+                          cv.drawCircle(c[0], c[1], hr, hLine);
+                      }
+                  }
+
+                  int hit(float x, float y) {
+                      int best = -1;
+                      float bd = hitR;
+                      for (int i = 0; i < 4; i++) {
+                          float[] c = corner(i);
+                          float d = (float) Math.hypot(x - c[0], y - c[1]);
+                          if (d < bd) { bd = d; best = i; }
+                      }
+                      if (best >= 0) return best;
+                      return r.contains(x, y) ? 4 : -1;
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent e) {
+                      float x = e.getRawX(), y = e.getRawY();
+                      switch (e.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                              drag = hit(x, y);
+                              lx = x;
+                              ly = y;
+                              return drag >= 0;
+                          case MotionEvent.ACTION_MOVE: {
+                              if (drag < 0) return false;
+                              float dx = x - lx, dy = y - ly;
+                              lx = x;
+                              ly = y;
+                              if (drag == 4) {
+                                  float w = r.width(), hh = r.height();
+                                  float nl = Math.max(0, Math.min(sw - w, r.left + dx));
+                                  float nt = Math.max(0, Math.min(sh - hh, r.top + dy));
+                                  r.set(nl, nt, nl + w, nt + hh);
+                              } else {
+                                  if (drag == 0 || drag == 3) r.left = Math.max(0, Math.min(r.right - min, r.left + dx));
+                                  if (drag == 1 || drag == 2) r.right = Math.min(sw, Math.max(r.left + min, r.right + dx));
+                                  if (drag == 0 || drag == 1) r.top = Math.max(0, Math.min(r.bottom - min, r.top + dy));
+                                  if (drag == 2 || drag == 3) r.bottom = Math.min(sh, Math.max(r.top + min, r.bottom + dy));
+                              }
+                              invalidate();
+                              return true;
+                          }
+                          case MotionEvent.ACTION_UP:
+                          case MotionEvent.ACTION_CANCEL:
+                              drag = -1;
+                              return true;
+                      }
+                      return false;
+                  }
+              }
+
+              void openRegionSelector() {
+                  if (regionOverlay != null) return;
+                  int sw = getResources().getDisplayMetrics().widthPixels;
+                  int sh = getResources().getDisplayMetrics().heightPixels;
+                  RectF init;
+                  if (region != null) init = new RectF(region);
+                  else init = new RectF(sw * 0.15f, sh * 0.25f, sw * 0.85f, sh * 0.65f);
+
+                  FrameLayout root = new FrameLayout(this);
+                  root.setBackgroundColor(0x55000000);
+                  regionView = new RegionView(this, init);
+                  root.addView(regionView, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  TextView hint = new TextView(this);
+                  hint.setText("اسحب الزوايا للتكبير والتصغير، واسحب الداخل للتحريك");
+                  hint.setTextColor(Color.WHITE);
+                  hint.setTextSize(14);
+                  hint.setGravity(Gravity.CENTER);
+                  hint.setPadding(dp(18), dp(12), dp(18), dp(12));
+                  hint.setBackground(glass(dp(20), true, dp(14)));
+                  FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                          Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                  hp.topMargin = dp(60);
+                  root.addView(hint, hp);
+
+                  LinearLayout bar = new LinearLayout(this);
+                  bar.setOrientation(LinearLayout.HORIZONTAL);
+                  bar.setGravity(Gravity.CENTER);
+                  TextView no = roundBtn("✕", 0xFFFF453A);
+                  TextView ok = roundBtn("✓", 0xFF30D158);
+                  no.setOnClickListener(v -> removeRegionOverlay());
+                  ok.setOnClickListener(v -> {
+                      region = new RectF(regionView.r);
+                      removeRegionOverlay();
+                      Toast.makeText(this, "تم تحديد موقع الرسمة ✓", Toast.LENGTH_SHORT).show();
                   });
+                  LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(68), dp(68));
+                  bp.setMargins(dp(14), 0, dp(14), 0);
+                  bar.addView(no, bp);
+                  bar.addView(ok, bp);
+                  FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                          Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                  barLp.bottomMargin = dp(70);
+                  root.addView(bar, barLp);
+
                   WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                           WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -1372,25 +1259,46 @@ jobs:
                                   | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                                   | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                           PixelFormat.TRANSLUCENT);
-                  wm.addView(calib, lp);
+                  try {
+                      wm.addView(root, lp);
+                      regionOverlay = root;
+                  } catch (Exception e) {
+                      regionOverlay = null;
+                      regionView = null;
+                  }
               }
 
-              void onCalibTap(float x, float y) {
-                  if (taps == 0) {
-                      cx1 = x;
-                      cy1 = y;
-                      taps = 1;
-                      calibText.setText("الآن اضغط على الزاوية السفلية اليمنى للوحة");
+              TextView roundBtn(String text, int color) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextColor(color);
+                  t.setTextSize(30);
+                  t.setGravity(Gravity.CENTER);
+                  t.setBackground(glass(dp(100), true, dp(34)));
+                  t.setClickable(true);
+                  t.setOnTouchListener((v, e) -> {
+                      int a = e.getAction();
+                      if (a == MotionEvent.ACTION_DOWN) v.setAlpha(0.55f);
+                      else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) v.setAlpha(1f);
+                      return false;
+                  });
+                  return t;
+              }
+
+              void removeRegionOverlay() {
+                  try { if (regionOverlay != null) wm.removeView(regionOverlay); } catch (Exception e) {}
+                  regionOverlay = null;
+                  regionView = null;
+              }
+
+              // ============ بدء الرسم ============
+              void prepareStart() {
+                  final float x1 = region.left, y1 = region.top, y2 = region.bottom;
+                  float rw = region.width(), rh = region.height();
+                  if (rw < 100 || rh < 100) {
+                      Toast.makeText(this, "المنطقة صغيرة جداً، حدد موقعاً أكبر", Toast.LENGTH_LONG).show();
                       return;
                   }
-                  try { wm.removeView(calib); } catch (Exception e) {}
-                  calib = null;
-                  final float x1 = cx1, y1 = cy1, x2 = x, y2 = y;
-                  if (x2 - x1 < 100 || y2 - y1 < 100) {
-                      Toast.makeText(this, "المنطقة غير صحيحة، اضغط الزر وحاول مرة أخرى", Toast.LENGTH_LONG).show();
-                      return;
-                  }
-                  float rw = x2 - x1, rh = y2 - y1;
                   final float sc = Math.min(rw / imgW, rh / imgH);
                   final float ox = x1 + (rw - imgW * sc) / 2f;
                   final float oy = y1 + (rh - imgH * sc) / 2f;
@@ -1405,7 +1313,7 @@ jobs:
                           finishDraw("خطأ");
                       }
                   };
-                  h.postDelayed(pendingBegin, 2000);
+                  h.postDelayed(pendingBegin, 1500);
               }
 
               void showFrame(float ox, float oy, float w, float hh) {
@@ -1438,10 +1346,12 @@ jobs:
                   plan = buildPlan(ox, oy, sc);
                   drawing = true;
                   cancel = false;
+                  paused = false;
+                  loopWaiting = false;
                   okCount = 0;
                   failCount = 0;
                   if (fab != null) {
-                      setFab("⏹", 11);
+                      setFab("✎", 22);
                       // ننقل الزر خارج اللوحة حتى لا تصطدم به لمسات الرسم
                       int size = fabLp.width;
                       int screenH = getResources().getDisplayMetrics().heightPixels;
@@ -1511,81 +1421,32 @@ jobs:
                           float[] q = parts.get(pi);
                           float ql = length(q);
                           if (ql < 2f) continue;
+                          Piece pc = new Piece();
+                          pc.pts = q;
                           float sp = speed;
                           if (human) {
                               drift = Math.max(0.75f, Math.min(1.3f, drift + (rnd.nextFloat() - 0.5f) * 0.15f));
                               sp = speed * drift * (0.8f + rnd.nextFloat() * 0.45f);
                           }
-                          sp = Math.max(1f, sp);
-                          // الإيماءة الواحدة لا تتجاوز ~60 ثانية: السرعات البطيئة جداً تُقسَّم إلى أجزاء متصلة
-                          List<float[]> chunks = chunk(q, sp * 50f);
-                          for (int ci = 0; ci < chunks.size(); ci++) {
-                              float[] cq = chunks.get(ci);
-                              float cl = length(cq);
-                              if (cl < 0.5f) continue;
-                              Piece pc = new Piece();
-                              pc.pts = cq;
-                              pc.dur = (long) Math.max(150f, Math.min(59000f, cl / sp * 1000f));
-                              boolean last = ci == chunks.size() - 1;
-                              if (!last) {
-                                  pc.pause = 0;
-                              } else if (human) {
-                                  pc.pause = 150 + rnd.nextInt(550);
-                                  if (rnd.nextFloat() < 0.07f) pc.pause += 1200 + rnd.nextInt(1800);
-                                  if (pi == 0 && parts.size() > 1) pc.pause = 30 + rnd.nextInt(120);
-                              } else {
-                                  pc.pause = 40;
-                              }
-                              out.add(pc);
+                          pc.dur = (long) Math.max(150f, Math.min(59000f, ql / sp * 1000f));
+                          if (human) {
+                              pc.pause = rnd.nextInt(350);
+                              if (rnd.nextFloat() < 0.07f) pc.pause += 1200 + rnd.nextInt(1800);
+                              if (pi == 0 && parts.size() > 1) pc.pause = rnd.nextInt(60);
+                          } else {
+                              pc.pause = 0;
                           }
+                          out.add(pc);
                       }
                   }
                   return out;
-              }
-
-              /** يقسّم ضربة طويلة إلى أجزاء متصلة طول كل منها لا يتجاوز maxLen (حتى لا تزيد الإيماءة عن حدّ الزمن). */
-              static List<float[]> chunk(float[] q, float maxLen) {
-                  List<float[]> out = new ArrayList<>();
-                  ArrayList<Float> cur = new ArrayList<>();
-                  cur.add(q[0]);
-                  cur.add(q[1]);
-                  float acc = 0;
-                  for (int k = 2; k < q.length; k += 2) {
-                      float ax = cur.get(cur.size() - 2), ay = cur.get(cur.size() - 1);
-                      float bx = q[k], by = q[k + 1];
-                      float seg = (float) Math.hypot(bx - ax, by - ay);
-                      while (seg > 0 && acc + seg > maxLen) {
-                          float t = (maxLen - acc) / seg;
-                          float mx = ax + (bx - ax) * t, my = ay + (by - ay) * t;
-                          cur.add(mx);
-                          cur.add(my);
-                          out.add(toArr(cur));
-                          cur = new ArrayList<>();
-                          cur.add(mx);
-                          cur.add(my);
-                          ax = mx;
-                          ay = my;
-                          acc = 0;
-                          seg = (float) Math.hypot(bx - ax, by - ay);
-                      }
-                      cur.add(bx);
-                      cur.add(by);
-                      acc += seg;
-                  }
-                  if (cur.size() >= 4) out.add(toArr(cur));
-                  if (out.isEmpty()) out.add(q);
-                  return out;
-              }
-
-              static float[] toArr(List<Float> l) {
-                  float[] a = new float[l.size()];
-                  for (int i = 0; i < a.length; i++) a[i] = l.get(i);
-                  return a;
               }
 
               void finishDraw(String msg) {
                   drawing = false;
                   cancel = false;
+                  paused = false;
+                  loopWaiting = false;
                   setFab(okCount + "✓\n" + failCount + "✗", 11);
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
               }
@@ -1600,9 +1461,15 @@ jobs:
 
               void drawPiece(int i) {
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
+                  if (paused) {
+                      // نتوقف هنا ونحفظ مكاننا؛ عند "إكمال" نكمل من نفس الضربة
+                      resumeIdx = i;
+                      loopWaiting = true;
+                      return;
+                  }
                   if (plan == null || i >= plan.size()) { finishDraw("انتهى الرسم"); return; }
                   final Piece pc = plan.get(i);
-                  setFab("⏹\n" + i + "/" + plan.size(), 11);
+                  setFab("✎\n" + i + "/" + plan.size(), 11);
                   Path p = new Path();
                   p.moveTo(pc.pts[0], pc.pts[1]);
                   for (int k = 2; k < pc.pts.length; k += 2) p.lineTo(pc.pts[k], pc.pts[k + 1]);
@@ -1612,16 +1479,16 @@ jobs:
                   GestureResultCallback cb = new GestureResultCallback() {
                       @Override public void onCompleted(GestureDescription g) {
                           okCount++;
-                          h.postDelayed(() -> drawNext(i + 1), pc.pause);
+                          h.postDelayed(() -> drawNext(i + 1), delayMs + pc.pause);
                       }
                       @Override public void onCancelled(GestureDescription g) {
                           failCount++;
-                          h.postDelayed(() -> drawNext(i + 1), pc.pause);
+                          h.postDelayed(() -> drawNext(i + 1), delayMs + pc.pause);
                       }
                   };
                   if (!dispatchGesture(gd, cb, null)) {
                       failCount++;
-                      h.postDelayed(() -> drawNext(i + 1), pc.pause);
+                      h.postDelayed(() -> drawNext(i + 1), delayMs + pc.pause);
                   }
               }
           }
