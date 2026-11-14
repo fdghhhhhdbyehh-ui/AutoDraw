@@ -316,7 +316,10 @@ jobs:
                   b3.setText("3) ابدأ");
                   b3.setOnClickListener(v -> start());
 
-                  root.addView(b1);
+                  TextView ver = new TextView(this);
+          ver.setText("الإصدار 3");
+          root.addView(ver);
+          root.addView(b1);
                   root.addView(b2);
                   root.addView(t);
                   root.addView(detail);
@@ -515,6 +518,7 @@ jobs:
 
               void startCalibration() {
                   if (strokes == null || strokes.isEmpty()) return;
+                  if (fab != null) { fab.setTextSize(26); fab.setText("🎨"); }
                   taps = 0;
                   calib = new FrameLayout(this);
                   calib.setBackgroundColor(0x55000000);
@@ -564,6 +568,7 @@ jobs:
                   drawing = true;
                   cancel = false;
                   if (fab != null) {
+                      fab.setTextSize(11);
                       fab.setText("⏹");
                       int size = fabLp.width;
                       int screenH = getResources().getDisplayMetrics().heightPixels;
@@ -586,7 +591,7 @@ jobs:
               void finishDraw(String msg) {
                   drawing = false;
                   cancel = false;
-                  if (fab != null) fab.setText("🎨");
+                  if (fab != null) { fab.setTextSize(11); fab.setText(okCount + "✓\n" + failCount + "✗"); }
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
               }
 
@@ -602,6 +607,7 @@ jobs:
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
                   if (strokes == null || i >= strokes.size()) { finishDraw("انتهى الرسم"); return; }
                   int[] s = strokes.get(i);
+                  if (fab != null) fab.setText("⏹\n" + i + "/" + strokes.size());
                   Path p = new Path();
                   p.moveTo(ox + s[0] * sc, oy + s[1] * sc);
                   for (int k = 2; k < s.length; k += 2) {
