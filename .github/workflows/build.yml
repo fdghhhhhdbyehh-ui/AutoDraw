@@ -107,142 +107,403 @@ jobs:
           cat > app/src/main/java/com/autodraw/Tracer.java <<'EOF'
           package com.autodraw;
 
-          import android.graphics.Bitmap;
-          import android.graphics.Canvas;
-          import android.graphics.Color;
-          import android.graphics.Paint;
+          import java.util.ArrayDeque;
           import java.util.ArrayList;
+          import java.util.Arrays;
           import java.util.List;
 
+          /** استخراج خطوط نظيفة من صورة: Canny + تنحيف + تتبع مستمر للخطوط. بدون أي اعتماد على أندرويد. */
           class Tracer {
               static class Result {
-                  List<int[]> strokes = new ArrayList<>();
-                  Bitmap preview;
+                  List<float[]> strokes = new ArrayList<>();
                   int w, h;
+                  float totalLen;
               }
 
-              static Result trace(Bitmap src, int thr) {
-                  int w = src.getWidth(), h = src.getHeight();
+              static final int[] DX = {1, 1, 0, -1, -1, -1, 0, 1};
+              static final int[] DY = {0, 1, 1, 1, 0, -1, -1, -1};
+              static final int GAP = 4;
+
+              static class IL {
+                  int[] a = new int[64];
+                  int n;
+                  void add(int v) {
+                      if (n == a.length) a = Arrays.copyOf(a, n * 2);
+                      a[n++] = v;
+                  }
+              }
+
+              static Result trace(int[] argb, int w, int h, int detail) {
                   int n = w * h;
-                  int[] px = new int[n];
-                  src.getPixels(px, 0, w, 0, 0, w, h);
-                  int[] g = new int[n];
+                  float d = detail / 100f;
+                  Result res = new Result();
+                  res.w = w;
+                  res.h = h;
+
+                  // 1) رمادي (الشفافية فوق خلفية بيضاء)
+                  float[] gray = new float[n];
                   for (int i = 0; i < n; i++) {
-                      int c = px[i];
-                      g[i] = (int) (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c));
+                      int c = argb[i];
+                      float a = ((c >>> 24) & 255) / 255f;
+                      float r = ((c >> 16) & 255) * a + 255f * (1 - a);
+                      float g = ((c >> 8) & 255) * a + 255f * (1 - a);
+                      float b = (c & 255) * a + 255f * (1 - a);
+                      gray[i] = 0.299f * r + 0.587f * g + 0.114f * b;
                   }
 
-                  // تنعيم بسيط 3x3
-                  int[] bl = new int[n];
-                  for (int y = 0; y < h; y++) {
-                      for (int x = 0; x < w; x++) {
-                          int sum = 0;
-                          for (int j = -1; j <= 1; j++) {
-                              for (int k = -1; k <= 1; k++) {
-                                  int yy = Math.min(h - 1, Math.max(0, y + j));
-                                  int xx = Math.min(w - 1, Math.max(0, x + k));
-                                  sum += g[yy * w + xx];
-                              }
-                          }
-                          bl[y * w + x] = sum / 9;
-                      }
-                  }
+                  // 2) تنعيم غاوسي (تفاصيل أقل = تنعيم أكبر)
+                  float[] bl = blur(gray, w, h, 2.0f - 1.0f * d);
 
-                  // Sobel
-                  int[] gx = new int[n], gy = new int[n], mag = new int[n];
+                  // 3) Sobel
+                  float[] gx = new float[n], gy = new float[n], mag = new float[n];
+                  float maxMag = 0;
                   for (int y = 1; y < h - 1; y++) {
                       for (int x = 1; x < w - 1; x++) {
                           int i = y * w + x;
-                          int sx = -bl[i - w - 1] - 2 * bl[i - 1] - bl[i + w - 1] + bl[i - w + 1] + 2 * bl[i + 1] + bl[i + w + 1];
-                          int sy = -bl[i - w - 1] - 2 * bl[i - w] - bl[i - w + 1] + bl[i + w - 1] + 2 * bl[i + w] + bl[i + w + 1];
+                          float sx = -bl[i - w - 1] - 2 * bl[i - 1] - bl[i + w - 1] + bl[i - w + 1] + 2 * bl[i + 1] + bl[i + w + 1];
+                          float sy = -bl[i - w - 1] - 2 * bl[i - w] - bl[i - w + 1] + bl[i + w - 1] + 2 * bl[i + w] + bl[i + w + 1];
                           gx[i] = sx;
                           gy[i] = sy;
-                          mag[i] = Math.abs(sx) + Math.abs(sy);
+                          float m = (float) Math.sqrt(sx * sx + sy * sy);
+                          mag[i] = m;
+                          if (m > maxMag) maxMag = m;
                       }
                   }
+                  if (maxMag <= 0) return res;
 
-                  // تنحيف الحواف (non-max suppression)
+                  // عتبات تلقائية من توزيع قوة الحواف
+                  int[] hist = new int[1024];
+                  for (int i = 0; i < n; i++) hist[Math.min(1023, (int) (mag[i] / maxMag * 1023))]++;
+                  long target = (long) (n * 0.985), acc = 0;
+                  int bin = 0;
+                  for (; bin < 1024; bin++) {
+                      acc += hist[bin];
+                      if (acc >= target) break;
+                  }
+                  float pv = (Math.min(bin, 1023) + 1) / 1024f * maxMag;
+                  float high = pv * (0.55f - 0.42f * d);
+                  float low = high * 0.4f;
+
+                  // 4) NMS + hysteresis
+                  boolean[] cand = new boolean[n];
                   boolean[] edge = new boolean[n];
+                  int[] stack = new int[n];
+                  int sp = 0;
                   for (int y = 1; y < h - 1; y++) {
                       for (int x = 1; x < w - 1; x++) {
                           int i = y * w + x;
-                          if (mag[i] < thr) continue;
-                          int a, b;
-                          if (Math.abs(gx[i]) > Math.abs(gy[i])) {
-                              a = mag[i - 1];
-                              b = mag[i + 1];
-                          } else {
-                              a = mag[i - w];
-                              b = mag[i + w];
+                          float m = mag[i];
+                          if (m < low) continue;
+                          float ax = Math.abs(gx[i]), ay = Math.abs(gy[i]);
+                          float m1, m2;
+                          if (ay <= 0.4142f * ax) { m1 = mag[i - 1]; m2 = mag[i + 1]; }
+                          else if (ay >= 2.4142f * ax) { m1 = mag[i - w]; m2 = mag[i + w]; }
+                          else if ((gx[i] > 0) == (gy[i] > 0)) { m1 = mag[i - w - 1]; m2 = mag[i + w + 1]; }
+                          else { m1 = mag[i - w + 1]; m2 = mag[i + w - 1]; }
+                          if (m >= m1 && m > m2) {
+                              cand[i] = true;
+                              if (m >= high) { edge[i] = true; stack[sp++] = i; }
                           }
-                          edge[i] = mag[i] >= a && mag[i] > b;
+                      }
+                  }
+                  while (sp > 0) {
+                      int i = stack[--sp];
+                      int x = i % w, y = i / w;
+                      for (int k = 0; k < 8; k++) {
+                          int nx = x + DX[k], ny = y + DY[k];
+                          if (nx < 1 || ny < 1 || nx >= w - 1 || ny >= h - 1) continue;
+                          int ni = ny * w + nx;
+                          if (cand[ni] && !edge[ni]) { edge[ni] = true; stack[sp++] = ni; }
                       }
                   }
 
-                  // تتبع الحواف وتحويلها إلى خطوط
-                  Result r = new Result();
-                  r.w = w;
-                  r.h = h;
-                  boolean[] seen = new boolean[n];
-                  int[] dx = {1, -1, 0, 0, 1, 1, -1, -1};
-                  int[] dy = {0, 0, 1, -1, 1, -1, 1, -1};
+                  // 5) تنحيف إلى بكسل واحد
+                  thin(edge, w, h);
+
+                  // 6) تتبع الخطوط: نبدأ من الأطراف ثم الحلقات
+                  boolean[] used = new boolean[n];
+                  List<IL> raw = new ArrayList<>();
+                  for (int pass = 0; pass < 2; pass++) {
+                      for (int y = 1; y < h - 1; y++) {
+                          for (int x = 1; x < w - 1; x++) {
+                              int i = y * w + x;
+                              if (!edge[i] || used[i]) continue;
+                              if (pass == 0 && freeNeighbors(edge, used, x, y, w, h) != 1) continue;
+                              raw.add(traceFrom(x, y, edge, used, w, h));
+                          }
+                      }
+                  }
+
+                  // 7) تصفية القصير + تبسيط + حساب الحدود
+                  int minLen = (int) (8 + (100 - detail) * 0.35f);
+                  List<float[]> strokes = new ArrayList<>();
+                  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+                  for (IL p : raw) {
+                      int cnt = p.n / 2;
+                      if (cnt < minLen) continue;
+                      float[] s = simplify(p, 0.9f);
+                      if (s.length < 4) continue;
+                      for (int k = 0; k < s.length; k += 2) {
+                          minX = Math.min(minX, s[k]); maxX = Math.max(maxX, s[k]);
+                          minY = Math.min(minY, s[k + 1]); maxY = Math.max(maxY, s[k + 1]);
+                      }
+                      strokes.add(s);
+                  }
+                  if (strokes.isEmpty()) return res;
+
+                  // قص الهوامش الفارغة: الرسم يملأ اللوحة بأكبر حجم ممكن
+                  for (float[] s : strokes) {
+                      for (int k = 0; k < s.length; k += 2) { s[k] -= minX; s[k + 1] -= minY; }
+                  }
+                  res.w = (int) Math.ceil(maxX - minX) + 1;
+                  res.h = (int) Math.ceil(maxY - minY) + 1;
+
+                  // 8) ترتيب الخطوط بالأقرب فالأقرب
+                  res.strokes = order(strokes);
+                  float total = 0;
+                  for (float[] s : res.strokes) {
+                      for (int k = 2; k < s.length; k += 2) {
+                          total += (float) Math.hypot(s[k] - s[k - 2], s[k + 1] - s[k - 1]);
+                      }
+                  }
+                  res.totalLen = total;
+                  return res;
+              }
+
+              static float[] blur(float[] src, int w, int h, float sigma) {
+                  int r = Math.max(1, (int) Math.ceil(sigma * 2.5f));
+                  float[] k = new float[2 * r + 1];
+                  float sum = 0;
+                  for (int i = -r; i <= r; i++) {
+                      k[i + r] = (float) Math.exp(-(i * i) / (2 * sigma * sigma));
+                      sum += k[i + r];
+                  }
+                  for (int i = 0; i < k.length; i++) k[i] /= sum;
+                  float[] tmp = new float[w * h], out = new float[w * h];
                   for (int y = 0; y < h; y++) {
                       for (int x = 0; x < w; x++) {
-                          int i = y * w + x;
-                          if (!edge[i] || seen[i]) continue;
-                          List<Integer> path = new ArrayList<>();
-                          int cx = x, cy = y;
-                          while (true) {
-                              seen[cy * w + cx] = true;
-                              path.add(cx);
-                              path.add(cy);
-                              boolean moved = false;
-                              for (int d = 0; d < 8; d++) {
-                                  int nx = cx + dx[d], ny = cy + dy[d];
-                                  if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-                                  int ni = ny * w + nx;
-                                  if (edge[ni] && !seen[ni]) {
-                                      cx = nx;
-                                      cy = ny;
-                                      moved = true;
-                                      break;
-                                  }
-                              }
-                              if (!moved) break;
+                          float s = 0;
+                          for (int i = -r; i <= r; i++) {
+                              int xx = Math.min(w - 1, Math.max(0, x + i));
+                              s += src[y * w + xx] * k[i + r];
                           }
-                          int cnt = path.size() / 2;
-                          if (cnt < 6) continue;
-                          List<Integer> out = new ArrayList<>();
-                          for (int k = 0; k < cnt; k += 2) {
-                              out.add(path.get(k * 2));
-                              out.add(path.get(k * 2 + 1));
-                          }
-                          if ((cnt - 1) % 2 != 0) {
-                              out.add(path.get((cnt - 1) * 2));
-                              out.add(path.get((cnt - 1) * 2 + 1));
-                          }
-                          int[] s = new int[out.size()];
-                          for (int k = 0; k < s.length; k++) s[k] = out.get(k);
-                          r.strokes.add(s);
+                          tmp[y * w + x] = s;
                       }
                   }
+                  for (int y = 0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          float s = 0;
+                          for (int i = -r; i <= r; i++) {
+                              int yy = Math.min(h - 1, Math.max(0, y + i));
+                              s += tmp[yy * w + x] * k[i + r];
+                          }
+                          out[y * w + x] = s;
+                      }
+                  }
+                  return out;
+              }
 
-                  // صورة معاينة لما سيتم رسمه
-                  int sc = 3;
-                  Bitmap p = Bitmap.createBitmap(w * sc, h * sc, Bitmap.Config.ARGB_8888);
-                  Canvas cv = new Canvas(p);
-                  cv.drawColor(Color.WHITE);
-                  Paint paint = new Paint();
-                  paint.setColor(Color.BLACK);
-                  paint.setStrokeWidth(2f);
-                  paint.setAntiAlias(true);
-                  for (int[] s : r.strokes) {
-                      for (int k = 2; k < s.length; k += 2) {
-                          cv.drawLine(s[k - 2] * sc, s[k - 1] * sc, s[k] * sc, s[k + 1] * sc, paint);
+              /** Zhang-Suen */
+              static void thin(boolean[] im, int w, int h) {
+                  int[] buf = new int[w * h];
+                  boolean changed;
+                  do {
+                      changed = false;
+                      for (int step = 0; step < 2; step++) {
+                          int cnt = 0;
+                          for (int y = 1; y < h - 1; y++) {
+                              for (int x = 1; x < w - 1; x++) {
+                                  int i = y * w + x;
+                                  if (!im[i]) continue;
+                                  boolean p2 = im[i - w], p3 = im[i - w + 1], p4 = im[i + 1], p5 = im[i + w + 1];
+                                  boolean p6 = im[i + w], p7 = im[i + w - 1], p8 = im[i - 1], p9 = im[i - w - 1];
+                                  int b = (p2 ? 1 : 0) + (p3 ? 1 : 0) + (p4 ? 1 : 0) + (p5 ? 1 : 0)
+                                          + (p6 ? 1 : 0) + (p7 ? 1 : 0) + (p8 ? 1 : 0) + (p9 ? 1 : 0);
+                                  if (b < 2 || b > 6) continue;
+                                  int a = 0;
+                                  if (!p2 && p3) a++;
+                                  if (!p3 && p4) a++;
+                                  if (!p4 && p5) a++;
+                                  if (!p5 && p6) a++;
+                                  if (!p6 && p7) a++;
+                                  if (!p7 && p8) a++;
+                                  if (!p8 && p9) a++;
+                                  if (!p9 && p2) a++;
+                                  if (a != 1) continue;
+                                  if (step == 0) {
+                                      if (p2 && p4 && p6) continue;
+                                      if (p4 && p6 && p8) continue;
+                                  } else {
+                                      if (p2 && p4 && p8) continue;
+                                      if (p2 && p6 && p8) continue;
+                                  }
+                                  buf[cnt++] = i;
+                              }
+                          }
+                          for (int k = 0; k < cnt; k++) im[buf[k]] = false;
+                          if (cnt > 0) changed = true;
+                      }
+                  } while (changed);
+              }
+
+              static int freeNeighbors(boolean[] edge, boolean[] used, int x, int y, int w, int h) {
+                  int c = 0;
+                  for (int k = 0; k < 8; k++) {
+                      int nx = x + DX[k], ny = y + DY[k];
+                      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                      int ni = ny * w + nx;
+                      if (edge[ni] && !used[ni]) c++;
+                  }
+                  return c;
+              }
+
+              static IL traceFrom(int sx, int sy, boolean[] edge, boolean[] used, int w, int h) {
+                  used[sy * w + sx] = true;
+                  IL f = new IL();
+                  f.add(sx); f.add(sy);
+                  extend(f, edge, used, w, h);
+                  IL b = new IL();
+                  b.add(sx); b.add(sy);
+                  extend(b, edge, used, w, h);
+                  IL out = new IL();
+                  for (int k = b.n / 2 - 1; k >= 1; k--) { out.add(b.a[2 * k]); out.add(b.a[2 * k + 1]); }
+                  for (int k = 0; k < f.n / 2; k++) { out.add(f.a[2 * k]); out.add(f.a[2 * k + 1]); }
+                  int cnt = out.n / 2;
+                  if (cnt > 10) {
+                      int fx = out.a[0], fy = out.a[1], lx = out.a[out.n - 2], ly = out.a[out.n - 1];
+                      double dist = Math.hypot(fx - lx, fy - ly);
+                      if (dist > 0 && dist <= 2.5) { out.add(fx); out.add(fy); }
+                  }
+                  return out;
+              }
+
+              static void extend(IL p, boolean[] edge, boolean[] used, int w, int h) {
+                  while (true) {
+                      int k = p.n / 2;
+                      int cx = p.a[2 * k - 2], cy = p.a[2 * k - 1];
+                      float vx = 0, vy = 0;
+                      if (k >= 2) {
+                          int b = Math.max(0, k - 7);
+                          vx = cx - p.a[2 * b];
+                          vy = cy - p.a[2 * b + 1];
+                          float l = (float) Math.sqrt(vx * vx + vy * vy);
+                          if (l > 0) { vx /= l; vy /= l; }
+                      }
+                      int best = -1;
+                      float bs = -9;
+                      for (int d = 0; d < 8; d++) {
+                          int nx = cx + DX[d], ny = cy + DY[d];
+                          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                          int ni = ny * w + nx;
+                          if (!edge[ni] || used[ni]) continue;
+                          float sc;
+                          if (k < 2) sc = (d % 2 == 0) ? 1f : 0.9f;
+                          else {
+                              float l = (d % 2 == 0) ? 1f : 1.4142f;
+                              sc = (DX[d] * vx + DY[d] * vy) / l;
+                          }
+                          if (sc > bs) { bs = sc; best = d; }
+                      }
+                      if (best >= 0) {
+                          int nx = cx + DX[best], ny = cy + DY[best];
+                          used[ny * w + nx] = true;
+                          p.add(nx); p.add(ny);
+                          continue;
+                      }
+                      if (k < 2) break;
+                      // سدّ فجوة صغيرة بالاتجاه الأمامي
+                      int bx = -1, by = -1;
+                      float bscore = 1e9f;
+                      for (int dy = -GAP; dy <= GAP; dy++) {
+                          for (int dx = -GAP; dx <= GAP; dx++) {
+                              float dist = (float) Math.sqrt(dx * dx + dy * dy);
+                              if (dist < 1.5f || dist > GAP) continue;
+                              int nx = cx + dx, ny = cy + dy;
+                              if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                              int ni = ny * w + nx;
+                              if (!edge[ni] || used[ni]) continue;
+                              float dot = (dx * vx + dy * vy) / dist;
+                              if (dot < 0.6f) continue;
+                              float score = dist - dot;
+                              if (score < bscore) { bscore = score; bx = nx; by = ny; }
+                          }
+                      }
+                      if (bx < 0) break;
+                      used[by * w + bx] = true;
+                      p.add(bx); p.add(by);
+                  }
+              }
+
+              /** Douglas-Peucker */
+              static float[] simplify(IL p, float eps) {
+                  int n = p.n / 2;
+                  boolean[] keep = new boolean[n];
+                  keep[0] = true;
+                  keep[n - 1] = true;
+                  ArrayDeque<int[]> st = new ArrayDeque<>();
+                  st.push(new int[]{0, n - 1});
+                  while (!st.isEmpty()) {
+                      int[] r = st.pop();
+                      int a = r[0], b = r[1];
+                      if (b <= a + 1) continue;
+                      float ax = p.a[2 * a], ay = p.a[2 * a + 1], bx = p.a[2 * b], by = p.a[2 * b + 1];
+                      float dx = bx - ax, dy = by - ay;
+                      float len = (float) Math.sqrt(dx * dx + dy * dy);
+                      float md = -1;
+                      int mi = -1;
+                      for (int i = a + 1; i < b; i++) {
+                          float px = p.a[2 * i], py = p.a[2 * i + 1];
+                          float dd;
+                          if (len == 0) dd = (float) Math.hypot(px - ax, py - ay);
+                          else dd = Math.abs(dy * px - dx * py + bx * ay - by * ax) / len;
+                          if (dd > md) { md = dd; mi = i; }
+                      }
+                      if (md > eps) {
+                          keep[mi] = true;
+                          st.push(new int[]{a, mi});
+                          st.push(new int[]{mi, b});
                       }
                   }
-                  r.preview = p;
-                  return r;
+                  int c = 0;
+                  for (boolean k : keep) if (k) c++;
+                  float[] out = new float[c * 2];
+                  int j = 0;
+                  for (int i = 0; i < n; i++) {
+                      if (keep[i]) { out[j++] = p.a[2 * i]; out[j++] = p.a[2 * i + 1]; }
+                  }
+                  return out;
+              }
+
+              static List<float[]> order(List<float[]> in) {
+                  List<float[]> rest = new ArrayList<>(in);
+                  List<float[]> out = new ArrayList<>();
+                  float cx = 0, cy = 0;
+                  while (!rest.isEmpty()) {
+                      int bi = 0;
+                      boolean rev = false;
+                      float bd = 1e18f;
+                      for (int i = 0; i < rest.size(); i++) {
+                          float[] s = rest.get(i);
+                          float d1 = (s[0] - cx) * (s[0] - cx) + (s[1] - cy) * (s[1] - cy);
+                          float ex = s[s.length - 2], ey = s[s.length - 1];
+                          float d2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
+                          if (d1 < bd) { bd = d1; bi = i; rev = false; }
+                          if (d2 < bd) { bd = d2; bi = i; rev = true; }
+                      }
+                      float[] s = rest.remove(bi);
+                      if (rev) {
+                          float[] r = new float[s.length];
+                          for (int k = 0; k < s.length; k += 2) {
+                              r[k] = s[s.length - 2 - k];
+                              r[k + 1] = s[s.length - 1 - k];
+                          }
+                          s = r;
+                      }
+                      out.add(s);
+                      cx = s[s.length - 2];
+                      cy = s[s.length - 1];
+                  }
+                  return out;
               }
           }
           EOF
@@ -256,6 +517,7 @@ jobs:
           import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.Paint;
           import android.net.Uri;
           import android.os.Bundle;
           import android.provider.Settings;
@@ -269,18 +531,23 @@ jobs:
           import java.io.InputStream;
 
           public class MainActivity extends Activity {
-              Bitmap bmp;
+              int[] pixels;
+              int pw, ph;
               Tracer.Result result;
               ImageView preview;
-              TextView info;
-              SeekBar detail;
+              TextView info, speedLabel;
+              SeekBar detail, speed;
+              int jobId = 0;
 
               @Override
               protected void onCreate(Bundle s) {
                   super.onCreate(s);
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(40, 80, 40, 40);
+                  root.setPadding(40, 70, 40, 30);
+
+                  TextView ver = new TextView(this);
+                  ver.setText("الإصدار 6");
 
                   Button b1 = new Button(this);
                   b1.setText("1) تفعيل خدمة الرسم");
@@ -294,14 +561,23 @@ jobs:
                       startActivityForResult(i, 1);
                   });
 
-                  TextView t = new TextView(this);
-                  t.setText("مستوى التفاصيل:");
-
+                  TextView t1 = new TextView(this);
+                  t1.setText("مستوى التفاصيل:");
                   detail = new SeekBar(this);
                   detail.setMax(100);
                   detail.setProgress(55);
                   detail.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                      @Override public void onProgressChanged(SeekBar sb, int p, boolean user) { process(); }
+                      @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {}
+                      @Override public void onStartTrackingTouch(SeekBar sb) {}
+                      @Override public void onStopTrackingTouch(SeekBar sb) { process(); }
+                  });
+
+                  speedLabel = new TextView(this);
+                  speed = new SeekBar(this);
+                  speed.setMax(100);
+                  speed.setProgress(25);
+                  speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar sb, int p, boolean user) { updateInfo(); }
                       @Override public void onStartTrackingTouch(SeekBar sb) {}
                       @Override public void onStopTrackingTouch(SeekBar sb) {}
                   });
@@ -316,17 +592,22 @@ jobs:
                   b3.setText("3) ابدأ");
                   b3.setOnClickListener(v -> start());
 
-                  TextView ver = new TextView(this);
-          ver.setText("الإصدار 3");
-          root.addView(ver);
-          root.addView(b1);
+                  root.addView(ver);
+                  root.addView(b1);
                   root.addView(b2);
-                  root.addView(t);
+                  root.addView(t1);
                   root.addView(detail);
+                  root.addView(speedLabel);
+                  root.addView(speed);
                   root.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
                   root.addView(info);
                   root.addView(b3);
                   setContentView(root);
+                  updateInfo();
+              }
+
+              float currentSpeed() {
+                  return 60f + speed.getProgress() * 4f;
               }
 
               @Override
@@ -345,21 +626,23 @@ jobs:
                           BitmapFactory.decodeStream(in, null, o);
                       }
                       int ss = 1;
-                      while (Math.max(o.outWidth, o.outHeight) / ss > 1000) ss *= 2;
+                      while (Math.max(o.outWidth, o.outHeight) / ss > 2000) ss *= 2;
                       o = new BitmapFactory.Options();
                       o.inSampleSize = ss;
                       Bitmap full;
                       try (InputStream in = getContentResolver().openInputStream(uri)) {
                           full = BitmapFactory.decodeStream(in, null, o);
                       }
-                      float k = 240f / Math.max(full.getWidth(), full.getHeight());
-                      int w = Math.max(1, (int) (full.getWidth() * k));
-                      int h = Math.max(1, (int) (full.getHeight() * k));
-                      Bitmap scaled = Bitmap.createScaledBitmap(full, w, h, true);
-                      bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                      Canvas c = new Canvas(bmp);
+                      float k = Math.min(3f, 720f / Math.max(full.getWidth(), full.getHeight()));
+                      pw = Math.max(16, (int) (full.getWidth() * k));
+                      ph = Math.max(16, (int) (full.getHeight() * k));
+                      Bitmap scaled = Bitmap.createScaledBitmap(full, pw, ph, true);
+                      Bitmap flat = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888);
+                      Canvas c = new Canvas(flat);
                       c.drawColor(Color.WHITE);
                       c.drawBitmap(scaled, 0, 0, null);
+                      pixels = new int[pw * ph];
+                      flat.getPixels(pixels, 0, pw, 0, 0, pw, ph);
                       process();
                   } catch (Exception e) {
                       Toast.makeText(this, "تعذر فتح الصورة", Toast.LENGTH_SHORT).show();
@@ -367,11 +650,54 @@ jobs:
               }
 
               void process() {
-                  if (bmp == null) return;
-                  int thr = 600 - detail.getProgress() * 5;
-                  result = Tracer.trace(bmp, thr);
-                  preview.setImageBitmap(result.preview);
-                  info.setText("عدد الخطوط: " + result.strokes.size());
+                  if (pixels == null) return;
+                  final int id = ++jobId;
+                  final int d = detail.getProgress();
+                  final int[] px = pixels;
+                  final int w = pw, h = ph;
+                  info.setText("جارٍ استخراج الخطوط...");
+                  new Thread(() -> {
+                      try {
+                          final Tracer.Result r = Tracer.trace(px, w, h, d);
+                          final Bitmap pv = render(r);
+                          runOnUiThread(() -> {
+                              if (id != jobId) return;
+                              result = r;
+                              preview.setImageBitmap(pv);
+                              updateInfo();
+                          });
+                      } catch (Throwable t) {
+                          final String msg = String.valueOf(t);
+                          runOnUiThread(() -> info.setText("خطأ: " + msg));
+                      }
+                  }).start();
+              }
+
+              Bitmap render(Tracer.Result r) {
+                  int rw = Math.max(1, r.w), rh = Math.max(1, r.h);
+                  float sc = Math.min(1000f / rw, 1400f / rh);
+                  Bitmap bm = Bitmap.createBitmap((int) (rw * sc) + 8, (int) (rh * sc) + 8, Bitmap.Config.ARGB_8888);
+                  Canvas cv = new Canvas(bm);
+                  cv.drawColor(Color.WHITE);
+                  Paint p = new Paint();
+                  p.setColor(Color.BLACK);
+                  p.setStrokeWidth(2f);
+                  p.setAntiAlias(true);
+                  for (float[] s : r.strokes) {
+                      for (int k = 2; k < s.length; k += 2) {
+                          cv.drawLine(s[k - 2] * sc + 4, s[k - 1] * sc + 4, s[k] * sc + 4, s[k + 1] * sc + 4, p);
+                      }
+                  }
+                  return bm;
+              }
+
+              void updateInfo() {
+                  float sp = currentSpeed();
+                  speedLabel.setText("سرعة الرسم: " + (int) sp + " بكسل/ثانية  (الأقل = أبطأ)");
+                  if (result == null) return;
+                  int secs = (int) (result.totalLen * 1.5f / sp);
+                  String t = secs >= 60 ? (secs / 60) + " دقيقة تقريباً" : secs + " ثانية تقريباً";
+                  info.setText("عدد الخطوط: " + result.strokes.size() + "  |  الزمن: " + t);
               }
 
               void start() {
@@ -387,6 +713,7 @@ jobs:
                   DrawService.strokes = result.strokes;
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
+                  DrawService.speed = currentSpeed();
                   DrawService.instance.showFab();
                   Toast.makeText(this, "افتح اللعبة ثم اضغط زر 🎨", Toast.LENGTH_LONG).show();
                   moveTaskToBack(true);
@@ -419,20 +746,22 @@ jobs:
 
           public class DrawService extends AccessibilityService {
               static DrawService instance;
-              static List<int[]> strokes;
-              static int imgW, imgH;
-              static final int MS_PER_POINT = 25;
+              static List<float[]> strokes;
+              static float imgW, imgH;
+              static float speed = 160f;
 
               WindowManager wm;
               TextView fab;
               WindowManager.LayoutParams fabLp;
               FrameLayout calib;
               TextView calibText;
+              View frame;
+              Runnable pendingBegin;
               final Handler h = new Handler(Looper.getMainLooper());
               boolean drawing, cancel;
               float cx1, cy1;
               int taps;
-          int okCount, failCount;
+              int okCount, failCount;
 
               @Override
               protected void onServiceConnected() {
@@ -451,10 +780,22 @@ jobs:
               }
 
               void hideAll() {
+                  removeFrame();
                   try { if (fab != null) wm.removeView(fab); } catch (Exception e) {}
                   try { if (calib != null) wm.removeView(calib); } catch (Exception e) {}
                   fab = null;
                   calib = null;
+              }
+
+              void removeFrame() {
+                  try { if (frame != null) wm.removeView(frame); } catch (Exception e) {}
+                  frame = null;
+              }
+
+              void setFab(String text, int size) {
+                  if (fab == null) return;
+                  fab.setTextSize(size);
+                  fab.setText(text);
               }
 
               void showFab() {
@@ -470,7 +811,7 @@ jobs:
                   int size = (int) (56 * getResources().getDisplayMetrics().density);
                   fabLp = new WindowManager.LayoutParams(size, size,
                           WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
                           PixelFormat.TRANSLUCENT);
                   fabLp.gravity = Gravity.TOP | Gravity.LEFT;
                   fabLp.x = getResources().getDisplayMetrics().widthPixels - size - 20;
@@ -511,6 +852,11 @@ jobs:
               void onFabClick() {
                   if (drawing) {
                       cancel = true;
+                  } else if (pendingBegin != null) {
+                      h.removeCallbacks(pendingBegin);
+                      pendingBegin = null;
+                      removeFrame();
+                      setFab("🎨", 26);
                   } else if (calib == null) {
                       startCalibration();
                   }
@@ -518,7 +864,7 @@ jobs:
 
               void startCalibration() {
                   if (strokes == null || strokes.isEmpty()) return;
-                  if (fab != null) { fab.setTextSize(26); fab.setText("🎨"); }
+                  setFab("🎨", 26);
                   taps = 0;
                   calib = new FrameLayout(this);
                   calib.setBackgroundColor(0x55000000);
@@ -556,20 +902,63 @@ jobs:
                   }
                   try { wm.removeView(calib); } catch (Exception e) {}
                   calib = null;
-                  final float fx1 = cx1, fy1 = cy1, fx2 = x, fy2 = y;
-                  if (fx2 - fx1 < 100 || fy2 - fy1 < 100) {
+                  final float x1 = cx1, y1 = cy1, x2 = x, y2 = y;
+                  if (x2 - x1 < 100 || y2 - y1 < 100) {
                       Toast.makeText(this, "المنطقة غير صحيحة، اضغط الزر وحاول مرة أخرى", Toast.LENGTH_LONG).show();
                       return;
                   }
-                  h.postDelayed(() -> beginDraw(fx1, fy1, fx2, fy2), 500);
+                  float rw = x2 - x1, rh = y2 - y1;
+                  final float sc = Math.min(rw / imgW, rh / imgH);
+                  final float ox = x1 + (rw - imgW * sc) / 2f;
+                  final float oy = y1 + (rh - imgH * sc) / 2f;
+                  // إطار أحمر يوضح مكان الرسم قبل البدء (اضغط الزر لإلغاء إن كان المكان خاطئاً)
+                  showFrame(ox, oy, imgW * sc, imgH * sc);
+                  setFab("إلغاء", 11);
+                  pendingBegin = () -> {
+                      pendingBegin = null;
+                      try {
+                          beginDraw(x1, y1, y2, ox, oy, sc);
+                      } catch (Exception e) {
+                          finishDraw("خطأ");
+                      }
+                  };
+                  h.postDelayed(pendingBegin, 2000);
               }
 
-              void beginDraw(float x1, float y1, float x2, float y2) {
+              void showFrame(float ox, float oy, float w, float hh) {
+                  removeFrame();
+                  try {
+                      frame = new View(this);
+                      GradientDrawable gd = new GradientDrawable();
+                      gd.setColor(0x00000000);
+                      gd.setStroke(5, 0xFFFF1744);
+                      frame.setBackground(gd);
+                      WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                              Math.max(1, (int) w), Math.max(1, (int) hh),
+                              WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                      | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                              PixelFormat.TRANSLUCENT);
+                      lp.gravity = Gravity.TOP | Gravity.LEFT;
+                      lp.x = (int) ox;
+                      lp.y = (int) oy;
+                      wm.addView(frame, lp);
+                  } catch (Exception e) {
+                      frame = null;
+                  }
+              }
+
+              void beginDraw(float x1, float y1, float y2, float ox, float oy, float sc) {
+                  removeFrame();
                   drawing = true;
                   cancel = false;
+                  okCount = 0;
+                  failCount = 0;
                   if (fab != null) {
-                      fab.setTextSize(11);
-                      fab.setText("⏹");
+                      setFab("⏹", 11);
+                      // ننقل الزر خارج اللوحة حتى لا تصطدم به لمسات الرسم
                       int size = fabLp.width;
                       int screenH = getResources().getDisplayMetrics().heightPixels;
                       int ny = (int) y2 + 15;
@@ -578,58 +967,62 @@ jobs:
                       fabLp.y = ny;
                       try { wm.updateViewLayout(fab, fabLp); } catch (Exception e) {}
                   }
-                  float rw = x2 - x1, rh = y2 - y1;
-                  float sc = Math.min(rw / imgW, rh / imgH);
-                  float ox = x1 + (rw - imgW * sc) / 2f;
-                  float oy = y1 + (rh - imgH * sc) / 2f;
-                  okCount = 0;
-              failCount = 0;
-              Toast.makeText(this, "بدأ الرسم: " + strokes.size() + " خط، المنطقة " + (int) rw + "x" + (int) rh, Toast.LENGTH_LONG).show();
-              drawNext(0, ox, oy, sc);
+                  Toast.makeText(this, "بدأ الرسم: " + strokes.size() + " خط", Toast.LENGTH_SHORT).show();
+                  drawNext(0, ox, oy, sc);
               }
 
               void finishDraw(String msg) {
                   drawing = false;
                   cancel = false;
-                  if (fab != null) { fab.setTextSize(11); fab.setText(okCount + "✓\n" + failCount + "✗"); }
+                  setFab(okCount + "✓\n" + failCount + "✗", 11);
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
               }
 
               void drawNext(int i, float ox, float oy, float sc) {
-              try {
-                  drawStroke(i, ox, oy, sc);
-              } catch (Exception e) {
-                  finishDraw("خطأ: " + e);
+                  try {
+                      drawStroke(i, ox, oy, sc);
+                  } catch (Exception e) {
+                      finishDraw("خطأ: " + e);
+                  }
               }
-          }
 
-          void drawStroke(int i, float ox, float oy, float sc) {
+              void drawStroke(int i, float ox, float oy, float sc) {
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
                   if (strokes == null || i >= strokes.size()) { finishDraw("انتهى الرسم"); return; }
-                  int[] s = strokes.get(i);
-                  if (fab != null) fab.setText("⏹\n" + i + "/" + strokes.size());
+                  float[] s = strokes.get(i);
+                  setFab("⏹\n" + i + "/" + strokes.size(), 11);
                   Path p = new Path();
-                  p.moveTo(ox + s[0] * sc, oy + s[1] * sc);
+                  float px = ox + (s[0] + 0.5f) * sc, py = oy + (s[1] + 0.5f) * sc;
+                  p.moveTo(px, py);
+                  float len = 0;
                   for (int k = 2; k < s.length; k += 2) {
-                      p.lineTo(ox + s[k] * sc, oy + s[k + 1] * sc);
+                      float qx = ox + (s[k] + 0.5f) * sc, qy = oy + (s[k + 1] + 0.5f) * sc;
+                      p.lineTo(qx, qy);
+                      len += (float) Math.hypot(qx - px, qy - py);
+                      px = qx;
+                      py = qy;
                   }
-                  long dur = Math.max(120, (long) (s.length / 2) * MS_PER_POINT);
+                  if (len < 2f) {
+                      h.post(() -> drawNext(i + 1, ox, oy, sc));
+                      return;
+                  }
+                  long dur = (long) Math.max(150f, Math.min(59000f, len / speed * 1000f));
                   GestureDescription gd = new GestureDescription.Builder()
                           .addStroke(new GestureDescription.StrokeDescription(p, 0, dur))
                           .build();
                   GestureResultCallback cb = new GestureResultCallback() {
                       @Override public void onCompleted(GestureDescription g) {
                           okCount++;
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
+                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
                       }
                       @Override public void onCancelled(GestureDescription g) {
                           failCount++;
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
+                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
                       }
                   };
                   if (!dispatchGesture(gd, cb, null)) {
                       failCount++;
-                      h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 30);
+                      h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
                   }
               }
           }
