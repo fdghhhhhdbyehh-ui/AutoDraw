@@ -67,7 +67,7 @@ jobs:
                   android:label="رسام تلقائي"
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true">
+                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -119,6 +119,8 @@ jobs:
                   List<float[]> strokes = new ArrayList<>();
                   int w, h;
                   float totalLen;
+                  int fillCount;   // أول fillCount خط هي خطوط تعبئة الأسود/الظلال
+                  float fillW;     // المسافة بين خطوط التعبئة (للمعاينة)
               }
 
               static final int[] DX = {1, 1, 0, -1, -1, -1, 0, 1};
@@ -134,7 +136,7 @@ jobs:
                   }
               }
 
-              static Result trace(int[] argb, int w, int h, int detail) {
+              static Result trace(int[] argb, int w, int h, int detail, boolean fill) {
                   int n = w * h;
                   float d = detail / 100f;
                   Result res = new Result();
@@ -235,32 +237,38 @@ jobs:
                       }
                   }
 
-                  // 7) تصفية القصير + تبسيط + حساب الحدود
+                  // 7) تصفية القصير + تبسيط
                   int minLen = (int) (8 + (100 - detail) * 0.35f);
                   List<float[]> strokes = new ArrayList<>();
-                  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
                   for (IL p : raw) {
                       int cnt = p.n / 2;
                       if (cnt < minLen) continue;
                       float[] s = simplify(p, 0.9f);
                       if (s.length < 4) continue;
-                      for (int k = 0; k < s.length; k += 2) {
-                          minX = Math.min(minX, s[k]); maxX = Math.max(maxX, s[k]);
-                          minY = Math.min(minY, s[k + 1]); maxY = Math.max(maxY, s[k + 1]);
-                      }
                       strokes.add(s);
                   }
-                  if (strokes.isEmpty()) return res;
 
-                  // قص الهوامش الفارغة: الرسم يملأ اللوحة بأكبر حجم ممكن
-                  for (float[] s : strokes) {
-                      for (int k = 0; k < s.length; k += 2) { s[k] -= minX; s[k + 1] -= minY; }
-                  }
-                  res.w = (int) Math.ceil(maxX - minX) + 1;
-                  res.h = (int) Math.ceil(maxY - minY) + 1;
+                  // 7ب) تعبئة المساحات السوداء والظلال كما هي (بدل الاكتفاء بالإطار الخارجي)
+                  int fsp = Math.max(2, Math.round(5f - 2.5f * d));
+                  List<float[]> fills = new ArrayList<>();
+                  if (fill) fills = fillStrokes(bl, w, h, fsp);
+                  if (strokes.isEmpty() && fills.isEmpty()) return res;
 
-                  // 8) ترتيب الخطوط بالأقرب فالأقرب
-                  res.strokes = order(strokes);
+                  // حساب الحدود وقص الهوامش الفارغة: الرسم يملأ اللوحة بأكبر حجم ممكن
+                  float[] bb = {1e9f, 1e9f, -1e9f, -1e9f};
+                  grow(strokes, bb);
+                  grow(fills, bb);
+                  shift(strokes, bb[0], bb[1]);
+                  shift(fills, bb[0], bb[1]);
+                  res.w = (int) Math.ceil(bb[2] - bb[0]) + 1;
+                  res.h = (int) Math.ceil(bb[3] - bb[1]) + 1;
+
+                  // 8) ترتيب الخطوط بالأقرب فالأقرب: التعبئة أولاً ثم الخطوط الخارجية فوقها
+                  List<float[]> all = new ArrayList<>(order(fills));
+                  all.addAll(order(strokes));
+                  res.fillCount = fills.size();
+                  res.fillW = fsp;
+                  res.strokes = all;
                   float total = 0;
                   for (float[] s : res.strokes) {
                       for (int k = 2; k < s.length; k += 2) {
@@ -269,6 +277,143 @@ jobs:
                   }
                   res.totalLen = total;
                   return res;
+              }
+
+              static void grow(List<float[]> list, float[] bb) {
+                  for (float[] s : list) {
+                      for (int k = 0; k < s.length; k += 2) {
+                          bb[0] = Math.min(bb[0], s[k]); bb[2] = Math.max(bb[2], s[k]);
+                          bb[1] = Math.min(bb[1], s[k + 1]); bb[3] = Math.max(bb[3], s[k + 1]);
+                      }
+                  }
+              }
+
+              static void shift(List<float[]> list, float dx, float dy) {
+                  for (float[] s : list) {
+                      for (int k = 0; k < s.length; k += 2) { s[k] -= dx; s[k + 1] -= dy; }
+                  }
+              }
+
+              /** عتبة أوتسو لفصل الداكن عن الفاتح */
+              static int otsu(float[] g, int n) {
+                  int[] hs = new int[256];
+                  for (int i = 0; i < n; i++) hs[Math.max(0, Math.min(255, (int) g[i]))]++;
+                  long sumAll = 0;
+                  for (int i = 0; i < 256; i++) sumAll += (long) i * hs[i];
+                  long wB = 0, sumB = 0;
+                  double best = -1;
+                  int th = 128;
+                  for (int t = 0; t < 256; t++) {
+                      wB += hs[t];
+                      if (wB == 0) continue;
+                      long wF = n - wB;
+                      if (wF == 0) break;
+                      sumB += (long) t * hs[t];
+                      double mB = (double) sumB / wB, mF = (double) (sumAll - sumB) / wF;
+                      double v = (double) wB * wF * (mB - mF) * (mB - mF);
+                      if (v > best) { best = v; th = t; }
+                  }
+                  return th;
+              }
+
+              /** تآكل مربع بنصف قطر r: يزيل الخطوط الرفيعة ويُبقي المساحات الممتلئة فقط */
+              static boolean[] erode(boolean[] m, int w, int h, int r) {
+                  boolean[] a = new boolean[w * h], b = new boolean[w * h];
+                  for (int y = 0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          boolean ok = true;
+                          for (int i = -r; i <= r && ok; i++) {
+                              int xx = Math.min(w - 1, Math.max(0, x + i));
+                              if (!m[y * w + xx]) ok = false;
+                          }
+                          a[y * w + x] = ok;
+                      }
+                  }
+                  for (int y = 0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          boolean ok = true;
+                          for (int i = -r; i <= r && ok; i++) {
+                              int yy = Math.min(h - 1, Math.max(0, y + i));
+                              if (!a[yy * w + x]) ok = false;
+                          }
+                          b[y * w + x] = ok;
+                      }
+                  }
+                  return b;
+              }
+
+              /** خطوط تعبئة: كثيفة للأسود، وأخف للرمادي (ظلال القلم) */
+              static List<float[]> fillStrokes(float[] g, int w, int h, int sp) {
+                  int n = w * h;
+                  int t = otsu(g, n);
+                  float darkT = Math.max(45f, Math.min(120f, t * 0.85f));
+                  float midT = Math.max(100f, Math.min(185f, t * 1.25f));
+                  boolean[] dark = new boolean[n], mid = new boolean[n];
+                  for (int i = 0; i < n; i++) {
+                      if (g[i] < darkT) dark[i] = true;
+                      else if (g[i] < midT) mid[i] = true;
+                  }
+                  dark = erode(dark, w, h, 1);
+                  mid = erode(mid, w, h, 3);
+                  List<float[]> out = new ArrayList<>();
+                  hatch(dark, w, h, sp, sp / 2, out);
+                  hatch(mid, w, h, sp * 3, sp, out);
+                  return out;
+              }
+
+              /** مسح أفقي للمساحة: كل مقطع يربط بالمقطع التالي تحته في ضربة واحدة متعرجة (أقل رفعات للقلم) */
+              static void hatch(boolean[] m, int w, int h, int sp, int off, List<float[]> out) {
+                  List<List<int[]>> rows = new ArrayList<>();
+                  for (int y = off; y < h - 1; y += sp) {
+                      List<int[]> rr = new ArrayList<>();
+                      int x = 0;
+                      while (x < w) {
+                          if (!m[y * w + x]) { x++; continue; }
+                          int x0 = x;
+                          while (x < w && m[y * w + x]) x++;
+                          if (x - x0 >= 3) rr.add(new int[]{x0, x - 1, y, 0});
+                      }
+                      rows.add(rr);
+                  }
+                  int lim = 2 * sp + 3;
+                  for (int r = 0; r < rows.size(); r++) {
+                      for (int[] run : rows.get(r)) {
+                          if (run[3] == 1) continue;
+                          run[3] = 1;
+                          IL p = new IL();
+                          p.add(run[0]); p.add(run[2]); p.add(run[1]); p.add(run[2]);
+                          int endX = run[1];
+                          int[] cur = run;
+                          int rr = r, steps = 0;
+                          while (rr + 1 < rows.size() && steps < 60) {
+                              int[] best = null;
+                              int bd = Integer.MAX_VALUE;
+                              boolean fromLeft = true;
+                              for (int[] c : rows.get(rr + 1)) {
+                                  if (c[3] == 1) continue;
+                                  if (c[1] < cur[0] || c[0] > cur[1]) continue;
+                                  int dl = Math.abs(c[0] - endX), dr = Math.abs(c[1] - endX);
+                                  int dd = Math.min(dl, dr);
+                                  if (dd < bd) { bd = dd; best = c; fromLeft = dl <= dr; }
+                              }
+                              if (best == null || bd > lim) break;
+                              best[3] = 1;
+                              if (fromLeft) {
+                                  p.add(best[0]); p.add(best[2]); p.add(best[1]); p.add(best[2]);
+                                  endX = best[1];
+                              } else {
+                                  p.add(best[1]); p.add(best[2]); p.add(best[0]); p.add(best[2]);
+                                  endX = best[0];
+                              }
+                              cur = best;
+                              rr++;
+                              steps++;
+                          }
+                          float[] s = new float[p.n];
+                          for (int k = 0; k < p.n; k++) s[k] = p.a[k];
+                          out.add(s);
+                      }
+                  }
               }
 
               static float[] blur(float[] src, int w, int h, float sigma) {
@@ -509,11 +654,74 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/java/com/autodraw/License.java <<'EOF'
+          package com.autodraw;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.widget.Toast;
+
+          /** نظام الاشتراك: محاولتان مجانيتان ثم رمز التفعيل. */
+          final class License {
+              static final String CODE = "asal";
+              static final int FREE = 2;
+              static final String WA_NUMBER = "9647892921403"; // 07892921403 بصيغة دولية (العراق)
+              static final String WA_SHOW = "07892921403";
+
+              static SharedPreferences p(Context c) {
+                  return c.getSharedPreferences("lic", Context.MODE_PRIVATE);
+              }
+
+              static boolean unlocked(Context c) {
+                  return p(c).getBoolean("u", false);
+              }
+
+              static int remaining(Context c) {
+                  return Math.max(0, FREE - p(c).getInt("used", 0));
+              }
+
+              static boolean canUse(Context c) {
+                  return unlocked(c) || remaining(c) > 0;
+              }
+
+              /** تُستهلك محاولة واحدة عند بدء رسمة فعلياً */
+              static void consume(Context c) {
+                  if (unlocked(c)) return;
+                  p(c).edit().putInt("used", p(c).getInt("used", 0) + 1).apply();
+              }
+
+              static boolean tryCode(Context c, String s) {
+                  if (s != null && s.trim().equalsIgnoreCase(CODE)) {
+                      p(c).edit().putBoolean("u", true).apply();
+                      return true;
+                  }
+                  return false;
+              }
+
+              static void openWhatsApp(Context c) {
+                  try {
+                      Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/" + WA_NUMBER));
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      c.startActivity(i);
+                  } catch (Exception e) {
+                      Toast.makeText(c, "تعذر فتح واتساب، رقمي: " + WA_SHOW, Toast.LENGTH_LONG).show();
+                  }
+              }
+          }
+          EOF
+
           cat > app/src/main/java/com/autodraw/MainActivity.java <<'EOF'
           package com.autodraw;
 
           import android.animation.ValueAnimator;
           import android.app.Activity;
+          import android.app.Dialog;
+          import android.graphics.drawable.ColorDrawable;
+          import android.text.InputType;
+          import android.view.WindowManager;
+          import android.widget.EditText;
           import android.content.Context;
           import android.content.Intent;
           import android.content.SharedPreferences;
@@ -566,10 +774,11 @@ jobs:
               Tracer.Result result;
               ImageView preview;
               TextView placeholder, info, speedValue, detailValue, strokesChip, timeChip, startBtn;
-              Row serviceRow, imageRow;
+              Row serviceRow, imageRow, licRow;
+              Dialog codeDialog;
               View statusDot;
               SeekBar detail, speed;
-              Switch humanSwitch;
+              Switch humanSwitch, fillSwitch;
               int jobId = 0;
               SharedPreferences prefs;
               BgView bg;
@@ -816,7 +1025,7 @@ jobs:
                   TextView title = tv("رسام تلقائي", 34, TXT, false);
                   title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
                   titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
-                  TextView ver = tv("الإصدار 9", 12, TXT, true);
+                  TextView ver = tv("الإصدار 10", 12, TXT, true);
                   ver.setPadding(dp(12), dp(5), dp(12), dp(5));
                   ver.setBackground(glass(dp(20), 0x33FFFFFF, 0x14FFFFFF, 0x5CFFFFFF, dp(12)));
                   titleRow.addView(ver);
@@ -853,6 +1062,17 @@ jobs:
                           tv("‹", 24, 0x66FFFFFF, false));
                   pressable(imageRow.v, this::pickImage);
                   g1.addView(imageRow.v);
+                  g1.addView(divider());
+
+                  licRow = makeRow("💎", 0xFFBF5AF2, 0xFF8944D0, "الاشتراك", "", tv("‹", 24, 0x66FFFFFF, false));
+                  pressable(licRow.v, () -> {
+                      if (License.unlocked(this)) {
+                          Toast.makeText(this, "الاشتراك مفعّل ✓", Toast.LENGTH_SHORT).show();
+                      } else {
+                          showCodeDialog(!License.canUse(this));
+                      }
+                  });
+                  g1.addView(licRow.v);
                   col.addView(g1);
                   animated.add(g1);
 
@@ -907,6 +1127,21 @@ jobs:
                           "سرعة متغيّرة وتوقفات طبيعية", humanSwitch);
                   humanRow.v.setOnClickListener(v -> humanSwitch.toggle());
                   g2.addView(humanRow.v);
+                  g2.addView(divider());
+
+                  fillSwitch = new Switch(this);
+                  fillSwitch.setChecked(prefs.getBoolean("fill", true));
+                  fillSwitch.setTrackTintList(new ColorStateList(st, new int[]{GREEN, 0x55FFFFFF}));
+                  fillSwitch.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+                  fillSwitch.setOnCheckedChangeListener((b, on) -> {
+                      b.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                      prefs.edit().putBoolean("fill", on).apply();
+                      process();
+                  });
+                  Row fillRow = makeRow("🖤", 0xFF48484A, 0xFF1C1C1E, "تعبئة الأسود والظلال",
+                          "يرسم المساحات السوداء كما هي دون حذفها", fillSwitch);
+                  fillRow.v.setOnClickListener(v -> fillSwitch.toggle());
+                  g2.addView(fillRow.v);
                   col.addView(g2);
                   animated.add(g2);
 
@@ -986,6 +1221,129 @@ jobs:
                               .setInterpolator(new DecelerateInterpolator()).start();
                   }
                   updateInfo();
+                  handleIntent(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  setIntent(i);
+                  handleIntent(i);
+              }
+
+              void handleIntent(Intent i) {
+                  if (i != null && i.getBooleanExtra("paywall", false)) {
+                      i.removeExtra("paywall");
+                      showCodeDialog(!License.canUse(this));
+                  }
+              }
+
+              void refreshLicense() {
+                  if (licRow == null) return;
+                  if (License.unlocked(this)) {
+                      licRow.sub.setText("مفعّل ✓  استخدام غير محدود");
+                      licRow.sub.setTextColor(0xFF7DDC98);
+                  } else {
+                      int r = License.remaining(this);
+                      if (r > 0) {
+                          licRow.sub.setText("محاولات مجانية متبقية: " + r + " من " + License.FREE + "  ·  اضغط لإدخال الرمز");
+                          licRow.sub.setTextColor(TXT2);
+                      } else {
+                          licRow.sub.setText("انتهت المحاولات المجانية، اضغط لإدخال الرمز");
+                          licRow.sub.setTextColor(0xFFFF8A80);
+                      }
+                  }
+              }
+
+              TextView gbtn(String s, int c1, int c2, Runnable r) {
+                  TextView t = tv(s, 16, TXT, true);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(8), dp(14), dp(8), dp(14));
+                  t.setBackground(glass(dp(18), c1, c2, 0x80FFFFFF, dp(24)));
+                  pressable(t, r);
+                  return t;
+              }
+
+              /** نافذة منبثقة زجاجية: إدخال الرمز أو التواصل عبر واتساب */
+              void showCodeDialog(boolean exhausted) {
+                  if (codeDialog != null && codeDialog.isShowing()) return;
+                  final Dialog d = new Dialog(this);
+                  codeDialog = d;
+                  d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  box.setPadding(dp(22), dp(24), dp(22), dp(20));
+                  box.setBackground(glass(dp(30), 0xD02A2A3C, 0xCC181826, 0x70FFFFFF, dp(60)));
+
+                  TextView t = tv(exhausted ? "🔒 انتهت المحاولات المجانية" : "💎 الاشتراك", 20, TXT, true);
+                  t.setGravity(Gravity.CENTER);
+                  box.addView(t);
+
+                  String msg = exhausted
+                          ? "استخدمت محاولتي الرسم المجانيتين.\nأدخل رمز التفعيل للمتابعة، أو تواصل معي على الواتساب:\n" + License.WA_SHOW
+                          : "لديك " + License.remaining(this) + " محاولة مجانية متبقية.\nأدخل رمز التفعيل لاستخدام التطبيق بلا حدود، أو تواصل معي على الواتساب:\n" + License.WA_SHOW;
+                  TextView mt = tv(msg, 14, 0xCCFFFFFF, false);
+                  mt.setGravity(Gravity.CENTER);
+                  mt.setPadding(0, dp(10), 0, dp(16));
+                  box.addView(mt);
+
+                  final EditText et = new EditText(this);
+                  et.setHint("رمز التفعيل");
+                  et.setHintTextColor(0x66FFFFFF);
+                  et.setTextColor(TXT);
+                  et.setTextSize(18);
+                  et.setGravity(Gravity.CENTER);
+                  et.setSingleLine(true);
+                  et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                  et.setBackground(glass(dp(16), 0x22FFFFFF, 0x0DFFFFFF, 0x66FFFFFF, dp(20)));
+                  et.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  box.addView(et, new LinearLayout.LayoutParams(-1, -2));
+
+                  TextView ok = gbtn("تفعيل", 0xE60A84FF, 0xCC5E5CE6, () -> {
+                      if (License.tryCode(this, et.getText().toString())) {
+                          Toast.makeText(this, "تم التفعيل ✓ شكراً لك", Toast.LENGTH_LONG).show();
+                          refreshLicense();
+                          d.dismiss();
+                      } else {
+                          et.setText("");
+                          et.setHint("الرمز غير صحيح");
+                          et.setHintTextColor(0xFFFF8A80);
+                          et.animate().translationX(-dp(8)).setDuration(50).withEndAction(() ->
+                                  et.animate().translationX(dp(8)).setDuration(50).withEndAction(() ->
+                                          et.animate().translationX(0).setDuration(50).start()).start()).start();
+                      }
+                  });
+                  LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(-1, -2);
+                  p1.topMargin = dp(14);
+                  box.addView(ok, p1);
+
+                  TextView wa = gbtn("💬 التواصل عبر واتساب", 0xE634C759, 0xCC248A3D, () -> License.openWhatsApp(this));
+                  LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(-1, -2);
+                  p2.topMargin = dp(10);
+                  box.addView(wa, p2);
+
+                  TextView cancel = tv("إغلاق", 15, TXT2, true);
+                  cancel.setGravity(Gravity.CENTER);
+                  cancel.setPadding(dp(8), dp(14), dp(8), 0);
+                  pressable(cancel, d::dismiss);
+                  box.addView(cancel, new LinearLayout.LayoutParams(-1, -2));
+
+                  d.setContentView(box);
+                  Window win = d.getWindow();
+                  win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                  win.setDimAmount(0.45f);
+                  win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+                  win.setLayout(Math.min(getResources().getDisplayMetrics().widthPixels - dp(40), dp(360)),
+                          WindowManager.LayoutParams.WRAP_CONTENT);
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      win.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+                      WindowManager.LayoutParams a = win.getAttributes();
+                      a.setBlurBehindRadius(30);
+                      win.setAttributes(a);
+                  }
+                  d.show();
               }
 
               TextView chip(String s) {
@@ -1013,6 +1371,7 @@ jobs:
               protected void onResume() {
                   super.onResume();
                   refreshService();
+                  refreshLicense();
               }
 
               void refreshService() {
@@ -1077,6 +1436,7 @@ jobs:
                   if (pixels == null) return;
                   final int id = ++jobId;
                   final int d = detail.getProgress();
+                  final boolean fl = fillSwitch.isChecked();
                   final int[] px = pixels;
                   final int w = pw, h = ph;
                   info.setText("جارٍ استخراج الخطوط...");
@@ -1084,7 +1444,7 @@ jobs:
                   timeChip.setText("⏱  …");
                   new Thread(() -> {
                       try {
-                          final Tracer.Result r = Tracer.trace(px, w, h, d);
+                          final Tracer.Result r = Tracer.trace(px, w, h, d, fl);
                           final Bitmap pvb = render(r);
                           runOnUiThread(() -> {
                               if (id != jobId) return;
@@ -1111,9 +1471,12 @@ jobs:
                   cv.drawColor(Color.WHITE);
                   Paint p = new Paint();
                   p.setColor(Color.BLACK);
-                  p.setStrokeWidth(2f);
                   p.setAntiAlias(true);
-                  for (float[] s : r.strokes) {
+                  p.setStrokeCap(Paint.Cap.ROUND);
+                  float fw = Math.max(2f, r.fillW * sc * 1.1f);
+                  for (int si = 0; si < r.strokes.size(); si++) {
+                      float[] s = r.strokes.get(si);
+                      p.setStrokeWidth(si < r.fillCount ? fw : 2f);
                       for (int k = 2; k < s.length; k += 2) {
                           cv.drawLine(s[k - 2] * sc + 4, s[k - 1] * sc + 4, s[k] * sc + 4, s[k + 1] * sc + 4, p);
                       }
@@ -1136,6 +1499,10 @@ jobs:
               }
 
               void start() {
+                  if (!License.canUse(this)) {
+                      showCodeDialog(true);
+                      return;
+                  }
                   if (result == null || result.strokes.isEmpty()) {
                       Toast.makeText(this, "اختر صورة أولاً", Toast.LENGTH_SHORT).show();
                       return;
@@ -1174,6 +1541,7 @@ jobs:
           import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.LayerDrawable;
+          import android.os.Build;
           import android.os.Handler;
           import android.os.Looper;
           import android.view.Gravity;
@@ -1212,6 +1580,7 @@ jobs:
               WindowManager.LayoutParams fabLp;
               LinearLayout menu;
               FrameLayout regionOverlay;
+              FrameLayout paywall;
               RegionView regionView;
               View frame;
               Runnable pendingBegin;
@@ -1285,6 +1654,7 @@ jobs:
 
               // ============ إدارة النوافذ ============
               void hideAll() {
+                  removePaywall();
                   removeFrame();
                   closeMenu();
                   removeRegionOverlay();
@@ -1498,6 +1868,11 @@ jobs:
                               drawNext(resumeIdx);
                           }
                       }
+                      return;
+                  }
+                  if (!License.canUse(this)) {
+                      closeMenu();
+                      showPaywall();
                       return;
                   }
                   if (strokes == null || strokes.isEmpty()) {
@@ -1719,6 +2094,82 @@ jobs:
                   regionView = null;
               }
 
+              // ============ نافذة الاشتراك المنبثقة ============
+              void showPaywall() {
+                  if (paywall != null || wm == null) return;
+                  FrameLayout root = new FrameLayout(this);
+                  root.setBackgroundColor(0x80000000);
+                  root.setClickable(true);
+                  root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setPadding(dp(20), dp(22), dp(20), dp(18));
+                  box.setBackground(glass(dp(30), true, dp(60)));
+
+                  TextView t = new TextView(this);
+                  t.setText("🔒 انتهت المحاولات المجانية");
+                  t.setTextColor(Color.WHITE);
+                  t.setTextSize(19);
+                  t.setGravity(Gravity.CENTER);
+                  t.getPaint().setFakeBoldText(true);
+                  box.addView(t, lpw(0, 0, 0, 0, 0));
+
+                  TextView m = new TextView(this);
+                  m.setText("أدخل رمز التفعيل للمتابعة، أو تواصل معي على الواتساب:\n" + License.WA_SHOW);
+                  m.setTextColor(0xCCFFFFFF);
+                  m.setTextSize(14);
+                  m.setGravity(Gravity.CENTER);
+                  m.setPadding(0, dp(10), 0, dp(16));
+                  box.addView(m, lpw(0, 0, 0, 0, 0));
+
+                  TextView code = btn("🔑 إدخال رمز التفعيل", 0xFF0A84FF);
+                  code.setOnClickListener(v -> {
+                      removePaywall();
+                      Intent i = new Intent(this, MainActivity.class);
+                      i.putExtra("paywall", true);
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                      startActivity(i);
+                  });
+                  box.addView(code, lpw(0, 0, 0, 0, 0));
+
+                  TextView wa = btn("💬 التواصل عبر واتساب", 0xFF30D158);
+                  wa.setOnClickListener(v -> {
+                      removePaywall();
+                      License.openWhatsApp(this);
+                  });
+                  box.addView(wa, lpw(0, 0, dp(8), 0, 0));
+
+                  TextView close = btn("إغلاق", 0xFFFFFFFF);
+                  close.setOnClickListener(v -> removePaywall());
+                  box.addView(close, lpw(0, 0, dp(8), 0, 0));
+
+                  root.addView(box, new FrameLayout.LayoutParams(dp(310), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          PixelFormat.TRANSLUCENT);
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      lp.flags |= WindowManager.LayoutParams.FLAG_BLUR_BEHIND;
+                      lp.setBlurBehindRadius(25);
+                  }
+                  try {
+                      wm.addView(root, lp);
+                      paywall = root;
+                  } catch (Exception e) {
+                      paywall = null;
+                  }
+              }
+
+              void removePaywall() {
+                  try { if (paywall != null) wm.removeView(paywall); } catch (Exception e) {}
+                  paywall = null;
+              }
+
               // ============ بدء الرسم ============
               void prepareStart() {
                   final float x1 = region.left, y1 = region.top, y2 = region.bottom;
@@ -1771,6 +2222,7 @@ jobs:
 
               void beginDraw(float x1, float y1, float y2, float ox, float oy, float sc) {
                   removeFrame();
+                  License.consume(this);
                   plan = buildPlan(ox, oy, sc);
                   drawing = true;
                   cancel = false;
@@ -1789,7 +2241,8 @@ jobs:
                       fabLp.y = ny;
                       try { wm.updateViewLayout(fab, fabLp); } catch (Exception e) {}
                   }
-                  Toast.makeText(this, "بدأ الرسم: " + plan.size() + " ضربة", Toast.LENGTH_SHORT).show();
+                  String left = License.unlocked(this) ? "" : "  |  محاولات متبقية: " + License.remaining(this);
+                  Toast.makeText(this, "بدأ الرسم: " + plan.size() + " ضربة" + left, Toast.LENGTH_SHORT).show();
                   drawNext(0);
               }
 
@@ -1877,6 +2330,8 @@ jobs:
                   loopWaiting = false;
                   setFab(okCount + "✓\n" + failCount + "✗", 11);
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
+                  // انتهت المحاولات المجانية: تظهر النافذة المنبثقة
+                  if (!License.canUse(this)) h.postDelayed(this::showPaywall, 1500);
               }
 
               void drawNext(int i) {
