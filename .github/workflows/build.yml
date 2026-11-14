@@ -523,6 +523,7 @@ jobs:
           import android.provider.Settings;
           import android.view.ViewGroup;
           import android.widget.Button;
+          import android.widget.CheckBox;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
           import android.widget.SeekBar;
@@ -537,6 +538,7 @@ jobs:
               ImageView preview;
               TextView info, speedLabel;
               SeekBar detail, speed;
+              CheckBox humanBox;
               int jobId = 0;
 
               @Override
@@ -547,7 +549,7 @@ jobs:
                   root.setPadding(40, 70, 40, 30);
 
                   TextView ver = new TextView(this);
-                  ver.setText("الإصدار 6");
+                  ver.setText("الإصدار 7");
 
                   Button b1 = new Button(this);
                   b1.setText("1) تفعيل خدمة الرسم");
@@ -582,6 +584,10 @@ jobs:
                       @Override public void onStopTrackingTouch(SeekBar sb) {}
                   });
 
+                  humanBox = new CheckBox(this);
+                  humanBox.setText("رسم بشري (سرعة متغيّرة وتوقفات طبيعية)");
+                  humanBox.setChecked(true);
+
                   preview = new ImageView(this);
                   preview.setBackgroundColor(Color.WHITE);
                   preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -599,6 +605,7 @@ jobs:
                   root.addView(detail);
                   root.addView(speedLabel);
                   root.addView(speed);
+                  root.addView(humanBox);
                   root.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
                   root.addView(info);
                   root.addView(b3);
@@ -714,6 +721,7 @@ jobs:
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
                   DrawService.speed = currentSpeed();
+                  DrawService.human = humanBox.isChecked();
                   DrawService.instance.showFab();
                   Toast.makeText(this, "افتح اللعبة ثم اضغط زر 🎨", Toast.LENGTH_LONG).show();
                   moveTaskToBack(true);
@@ -742,13 +750,24 @@ jobs:
           import android.widget.FrameLayout;
           import android.widget.TextView;
           import android.widget.Toast;
+          import java.util.ArrayList;
+          import java.util.Arrays;
           import java.util.List;
+          import java.util.Random;
 
           public class DrawService extends AccessibilityService {
               static DrawService instance;
               static List<float[]> strokes;
               static float imgW, imgH;
               static float speed = 160f;
+              static boolean human = true;
+
+              static class Piece {
+                  float[] pts;
+                  long dur;
+                  long pause;
+              }
+              List<Piece> plan;
 
               WindowManager wm;
               TextView fab;
@@ -952,6 +971,7 @@ jobs:
 
               void beginDraw(float x1, float y1, float y2, float ox, float oy, float sc) {
                   removeFrame();
+                  plan = buildPlan(ox, oy, sc);
                   drawing = true;
                   cancel = false;
                   okCount = 0;
@@ -967,8 +987,85 @@ jobs:
                       fabLp.y = ny;
                       try { wm.updateViewLayout(fab, fabLp); } catch (Exception e) {}
                   }
-                  Toast.makeText(this, "بدأ الرسم: " + strokes.size() + " خط", Toast.LENGTH_SHORT).show();
-                  drawNext(0, ox, oy, sc);
+                  Toast.makeText(this, "بدأ الرسم: " + plan.size() + " ضربة", Toast.LENGTH_SHORT).show();
+                  drawNext(0);
+              }
+
+              float length(float[] t) {
+                  float len = 0;
+                  for (int k = 2; k < t.length; k += 2) len += (float) Math.hypot(t[k] - t[k - 2], t[k + 1] - t[k - 1]);
+                  return len;
+              }
+
+              /** يحوّل الخطوط إلى ضربات قلم؛ في الوضع البشري: سرعات متغيرة، اهتزاز يد خفيف، رفع قلم وتوقفات طبيعية. */
+              List<Piece> buildPlan(float ox, float oy, float sc) {
+                  Random rnd = new Random();
+                  List<float[]> screen = new ArrayList<>();
+                  for (float[] s : strokes) {
+                      float[] t = new float[s.length];
+                      for (int k = 0; k < s.length; k += 2) {
+                          t[k] = ox + (s[k] + 0.5f) * sc;
+                          t[k + 1] = oy + (s[k + 1] + 0.5f) * sc;
+                      }
+                      screen.add(t);
+                  }
+                  if (human) {
+                      // الإنسان يرسم الخطوط العامة الطويلة أولاً ثم التفاصيل
+                      List<float[]> big = new ArrayList<>();
+                      List<float[]> small = new ArrayList<>();
+                      for (float[] t : screen) {
+                          if (length(t) >= 120f) big.add(t); else small.add(t);
+                      }
+                      screen = big;
+                      screen.addAll(small);
+                  }
+                  List<Piece> out = new ArrayList<>();
+                  float drift = 1f, wx = 0, wy = 0;
+                  for (float[] t : screen) {
+                      float len = length(t);
+                      if (len < 2f) continue;
+                      float[] pts = t;
+                      if (human) {
+                          pts = t.clone();
+                          for (int k = 0; k < pts.length; k += 2) {
+                              wx = 0.75f * wx + 0.25f * (float) rnd.nextGaussian() * 1.1f;
+                              wy = 0.75f * wy + 0.25f * (float) rnd.nextGaussian() * 1.1f;
+                              pts[k] += wx;
+                              pts[k + 1] += wy;
+                          }
+                      }
+                      List<float[]> parts = new ArrayList<>();
+                      int n = pts.length / 2;
+                      if (human && len > 220f && n >= 6 && rnd.nextFloat() < 0.6f) {
+                          int cut = 2 + rnd.nextInt(n - 4);
+                          parts.add(Arrays.copyOfRange(pts, 0, 2 * (cut + 1)));
+                          parts.add(Arrays.copyOfRange(pts, 2 * cut, pts.length));
+                      } else {
+                          parts.add(pts);
+                      }
+                      for (int pi = 0; pi < parts.size(); pi++) {
+                          float[] q = parts.get(pi);
+                          float ql = length(q);
+                          if (ql < 2f) continue;
+                          Piece pc = new Piece();
+                          pc.pts = q;
+                          float sp = speed;
+                          if (human) {
+                              drift = Math.max(0.75f, Math.min(1.3f, drift + (rnd.nextFloat() - 0.5f) * 0.15f));
+                              sp = speed * drift * (0.8f + rnd.nextFloat() * 0.45f);
+                          }
+                          pc.dur = (long) Math.max(150f, Math.min(59000f, ql / sp * 1000f));
+                          if (human) {
+                              pc.pause = 150 + rnd.nextInt(550);
+                              if (rnd.nextFloat() < 0.07f) pc.pause += 1200 + rnd.nextInt(1800);
+                              if (pi == 0 && parts.size() > 1) pc.pause = 30 + rnd.nextInt(120);
+                          } else {
+                              pc.pause = 40;
+                          }
+                          out.add(pc);
+                      }
+                  }
+                  return out;
               }
 
               void finishDraw(String msg) {
@@ -978,51 +1075,38 @@ jobs:
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
               }
 
-              void drawNext(int i, float ox, float oy, float sc) {
+              void drawNext(int i) {
                   try {
-                      drawStroke(i, ox, oy, sc);
+                      drawPiece(i);
                   } catch (Exception e) {
                       finishDraw("خطأ: " + e);
                   }
               }
 
-              void drawStroke(int i, float ox, float oy, float sc) {
+              void drawPiece(int i) {
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
-                  if (strokes == null || i >= strokes.size()) { finishDraw("انتهى الرسم"); return; }
-                  float[] s = strokes.get(i);
-                  setFab("⏹\n" + i + "/" + strokes.size(), 11);
+                  if (plan == null || i >= plan.size()) { finishDraw("انتهى الرسم"); return; }
+                  final Piece pc = plan.get(i);
+                  setFab("⏹\n" + i + "/" + plan.size(), 11);
                   Path p = new Path();
-                  float px = ox + (s[0] + 0.5f) * sc, py = oy + (s[1] + 0.5f) * sc;
-                  p.moveTo(px, py);
-                  float len = 0;
-                  for (int k = 2; k < s.length; k += 2) {
-                      float qx = ox + (s[k] + 0.5f) * sc, qy = oy + (s[k + 1] + 0.5f) * sc;
-                      p.lineTo(qx, qy);
-                      len += (float) Math.hypot(qx - px, qy - py);
-                      px = qx;
-                      py = qy;
-                  }
-                  if (len < 2f) {
-                      h.post(() -> drawNext(i + 1, ox, oy, sc));
-                      return;
-                  }
-                  long dur = (long) Math.max(150f, Math.min(59000f, len / speed * 1000f));
+                  p.moveTo(pc.pts[0], pc.pts[1]);
+                  for (int k = 2; k < pc.pts.length; k += 2) p.lineTo(pc.pts[k], pc.pts[k + 1]);
                   GestureDescription gd = new GestureDescription.Builder()
-                          .addStroke(new GestureDescription.StrokeDescription(p, 0, dur))
+                          .addStroke(new GestureDescription.StrokeDescription(p, 0, pc.dur))
                           .build();
                   GestureResultCallback cb = new GestureResultCallback() {
                       @Override public void onCompleted(GestureDescription g) {
                           okCount++;
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
+                          h.postDelayed(() -> drawNext(i + 1), pc.pause);
                       }
                       @Override public void onCancelled(GestureDescription g) {
                           failCount++;
-                          h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
+                          h.postDelayed(() -> drawNext(i + 1), pc.pause);
                       }
                   };
                   if (!dispatchGesture(gd, cb, null)) {
                       failCount++;
-                      h.postDelayed(() -> drawNext(i + 1, ox, oy, sc), 40);
+                      h.postDelayed(() -> drawNext(i + 1), pc.pause);
                   }
               }
           }
