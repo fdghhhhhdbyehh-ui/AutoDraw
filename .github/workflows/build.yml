@@ -65,7 +65,8 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
                   android:label="رسام تلقائي"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -511,106 +512,520 @@ jobs:
           cat > app/src/main/java/com/autodraw/MainActivity.java <<'EOF'
           package com.autodraw;
 
+          import android.animation.ValueAnimator;
           import android.app.Activity;
+          import android.content.Context;
           import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.res.ColorStateList;
           import android.graphics.Bitmap;
           import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.LinearGradient;
           import android.graphics.Paint;
+          import android.graphics.RadialGradient;
+          import android.graphics.Shader;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.Drawable;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.LayerDrawable;
           import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
           import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.HapticFeedbackConstants;
+          import android.view.MotionEvent;
+          import android.view.View;
           import android.view.ViewGroup;
-          import android.widget.Button;
-          import android.widget.CheckBox;
+          import android.view.Window;
+          import android.view.animation.DecelerateInterpolator;
+          import android.view.animation.LinearInterpolator;
+          import android.widget.FrameLayout;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
+          import android.widget.ScrollView;
           import android.widget.SeekBar;
+          import android.widget.Switch;
           import android.widget.TextView;
           import android.widget.Toast;
           import java.io.InputStream;
+          import java.util.ArrayList;
+          import java.util.List;
 
           public class MainActivity extends Activity {
+              static final int TXT = 0xFFFFFFFF;
+              static final int TXT2 = 0x99FFFFFF;
+              static final int BLUE = 0xFF0A84FF;
+              static final int GREEN = 0xFF30D158;
+              static final int RED = 0xFFFF453A;
+
               int[] pixels;
               int pw, ph;
               Tracer.Result result;
               ImageView preview;
-              TextView info, speedLabel;
+              TextView placeholder, info, speedValue, detailValue, strokesChip, timeChip, startBtn;
+              Row serviceRow, imageRow;
+              View statusDot;
               SeekBar detail, speed;
-              CheckBox humanBox;
+              Switch humanSwitch;
               int jobId = 0;
+              SharedPreferences prefs;
+              BgView bg;
 
+              // ============ خلفية متحركة (شفق ملوّن) خلف الزجاج ============
+              class BgView extends View {
+                  final Paint base = new Paint();
+                  final Paint[] orb = new Paint[5];
+                  final int[] cols = {0xFF0A84FF, 0xFFBF5AF2, 0xFFFF375F, 0xFF64D2FF, 0xFF5E5CE6};
+                  final float[] fx = {0.15f, 0.85f, 0.25f, 0.90f, 0.50f};
+                  final float[] fy = {0.12f, 0.30f, 0.62f, 0.82f, 0.45f};
+                  final float[] fr = {0.55f, 0.50f, 0.60f, 0.50f, 0.40f};
+                  final float[] fp = {0f, 1.3f, 2.6f, 3.9f, 5.2f};
+                  float R[] = new float[5];
+                  float t;
+                  ValueAnimator va;
+
+                  BgView(Context c) {
+                      super(c);
+                  }
+
+                  @Override
+                  protected void onSizeChanged(int w, int h, int ow, int oh) {
+                      base.setShader(new LinearGradient(0, 0, 0, h,
+                              new int[]{0xFF070B1E, 0xFF140B2E, 0xFF081A2C}, null, Shader.TileMode.CLAMP));
+                      for (int i = 0; i < 5; i++) {
+                          R[i] = fr[i] * w * 1.15f;
+                          int rgb = cols[i] & 0x00FFFFFF;
+                          Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                          p.setShader(new RadialGradient(0, 0, R[i],
+                                  new int[]{0x8C000000 | rgb, rgb}, null, Shader.TileMode.CLAMP));
+                          orb[i] = p;
+                      }
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas cv) {
+                      int w = getWidth(), h = getHeight();
+                      cv.drawRect(0, 0, w, h, base);
+                      double a = t * 2 * Math.PI;
+                      for (int i = 0; i < 5; i++) {
+                          if (orb[i] == null) continue;
+                          float x = (fx[i] + 0.08f * (float) Math.sin(a + fp[i])) * w;
+                          float y = (fy[i] + 0.06f * (float) Math.cos(a + fp[i] * 1.3)) * h;
+                          cv.save();
+                          cv.translate(x, y);
+                          cv.drawCircle(0, 0, R[i], orb[i]);
+                          cv.restore();
+                      }
+                  }
+
+                  @Override
+                  protected void onWindowVisibilityChanged(int v) {
+                      super.onWindowVisibilityChanged(v);
+                      if (v == VISIBLE) {
+                          if (va == null) {
+                              va = ValueAnimator.ofFloat(0f, 1f);
+                              va.setDuration(32000);
+                              va.setRepeatCount(ValueAnimator.INFINITE);
+                              va.setInterpolator(new LinearInterpolator());
+                              va.addUpdateListener(an -> {
+                                  t = (float) an.getAnimatedValue();
+                                  invalidate();
+                              });
+                          }
+                          if (!va.isStarted()) va.start();
+                      } else if (va != null) {
+                          va.cancel();
+                      }
+                  }
+              }
+
+              // ============ أدوات الزجاج ============
+              int dp(float v) {
+                  return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              Drawable glass(float radius, int c1, int c2, int stroke, int sheenH) {
+                  GradientDrawable base = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{c1, c2});
+                  base.setCornerRadius(radius);
+                  base.setStroke(Math.max(1, dp(1)), stroke);
+                  GradientDrawable sheen = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{0x3CFFFFFF, 0x00FFFFFF});
+                  sheen.setCornerRadius(radius);
+                  LayerDrawable ld = new LayerDrawable(new Drawable[]{base, sheen});
+                  ld.setLayerGravity(1, Gravity.TOP);
+                  ld.setLayerHeight(1, sheenH);
+                  ld.setLayerInset(1, dp(2), dp(2), dp(2), 0);
+                  return ld;
+              }
+
+              Drawable card(float radius) {
+                  return glass(radius, 0x33FFFFFF, 0x14FFFFFF, 0x5CFFFFFF, dp(44));
+              }
+
+              TextView tv(String s, float sp, int color, boolean medium) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  if (medium) t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                  return t;
+              }
+
+              /** ضغط ناعم (تصغير بسيط) + اهتزاز خفيف مثل iOS */
+              void pressable(final View v, final Runnable onTap) {
+                  v.setClickable(true);
+                  v.setOnTouchListener((x, e) -> {
+                      int a = e.getAction();
+                      if (a == MotionEvent.ACTION_DOWN) {
+                          x.animate().scaleX(0.97f).scaleY(0.97f).alpha(0.85f).setDuration(90).start();
+                      } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                          x.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(140).start();
+                      }
+                      return false;
+                  });
+                  v.setOnClickListener(x -> {
+                      x.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                      onTap.run();
+                  });
+              }
+
+              class Row {
+                  LinearLayout v;
+                  TextView title, sub;
+              }
+
+              Row makeRow(String emoji, int c1, int c2, String title, String sub, View trailing) {
+                  Row r = new Row();
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.HORIZONTAL);
+                  l.setGravity(Gravity.CENTER_VERTICAL);
+                  l.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+                  TextView badge = new TextView(this);
+                  badge.setText(emoji);
+                  badge.setTextSize(17);
+                  badge.setGravity(Gravity.CENTER);
+                  GradientDrawable bgd = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{c1, c2});
+                  bgd.setCornerRadius(dp(10));
+                  bgd.setStroke(1, 0x40FFFFFF);
+                  badge.setBackground(bgd);
+                  l.addView(badge, new LinearLayout.LayoutParams(dp(36), dp(36)));
+
+                  LinearLayout tx = new LinearLayout(this);
+                  tx.setOrientation(LinearLayout.VERTICAL);
+                  r.title = tv(title, 16, TXT, true);
+                  r.sub = tv(sub, 12.5f, TXT2, false);
+                  tx.addView(r.title);
+                  tx.addView(r.sub);
+                  LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                  tp.setMarginStart(dp(12));
+                  tp.setMarginEnd(dp(8));
+                  l.addView(tx, tp);
+
+                  if (trailing != null) l.addView(trailing);
+                  r.v = l;
+                  return r;
+              }
+
+              View divider() {
+                  View d = new View(this);
+                  d.setBackgroundColor(0x26FFFFFF);
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
+                  p.setMarginStart(dp(62));
+                  d.setLayoutParams(p);
+                  return d;
+              }
+
+              LinearLayout group() {
+                  LinearLayout g = new LinearLayout(this);
+                  g.setOrientation(LinearLayout.VERTICAL);
+                  g.setBackground(card(dp(24)));
+                  return g;
+              }
+
+              TextView sectionTitle(String s) {
+                  TextView t = tv(s, 13, TXT2, true);
+                  t.setPadding(dp(10), dp(22), dp(10), dp(8));
+                  return t;
+              }
+
+              void tintSeek(SeekBar sb) {
+                  sb.setProgressTintList(ColorStateList.valueOf(BLUE));
+                  sb.setProgressBackgroundTintList(ColorStateList.valueOf(0x40FFFFFF));
+                  sb.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+              }
+
+              LinearLayout sliderBlock(String title, TextView valueOut, SeekBar sb) {
+                  LinearLayout b = new LinearLayout(this);
+                  b.setOrientation(LinearLayout.VERTICAL);
+                  b.setPadding(dp(16), dp(14), dp(16), dp(8));
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  TextView t = tv(title, 16, TXT, true);
+                  head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  head.addView(valueOut);
+                  b.addView(head);
+                  LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  sp.topMargin = dp(6);
+                  b.addView(sb, sp);
+                  return b;
+              }
+
+              // ============ بناء الواجهة ============
               @Override
               protected void onCreate(Bundle s) {
                   super.onCreate(s);
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(40, 70, 40, 30);
+                  prefs = getSharedPreferences("ad", MODE_PRIVATE);
 
-                  TextView ver = new TextView(this);
-                  ver.setText("الإصدار 8");
+                  Window w = getWindow();
+                  w.setStatusBarColor(Color.TRANSPARENT);
+                  w.setNavigationBarColor(Color.TRANSPARENT);
+                  if (Build.VERSION.SDK_INT >= 29) w.setNavigationBarContrastEnforced(false);
+                  w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
 
-                  Button b1 = new Button(this);
-                  b1.setText("1) تفعيل خدمة الرسم");
-                  b1.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+                  final FrameLayout root = new FrameLayout(this);
+                  root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  bg = new BgView(this);
+                  root.addView(bg, new FrameLayout.LayoutParams(-1, -1));
 
-                  Button b2 = new Button(this);
-                  b2.setText("2) اختيار صورة");
-                  b2.setOnClickListener(v -> {
-                      Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-                      i.setType("image/*");
-                      startActivityForResult(i, 1);
-                  });
+                  final ScrollView scroll = new ScrollView(this);
+                  scroll.setVerticalScrollBarEnabled(false);
+                  scroll.setClipToPadding(false);
+                  scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                  root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
 
-                  TextView t1 = new TextView(this);
-                  t1.setText("مستوى التفاصيل:");
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(col, new ViewGroup.LayoutParams(-1, -2));
+
+                  List<View> animated = new ArrayList<>();
+
+                  // --- العنوان الكبير ---
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.VERTICAL);
+                  head.setPadding(dp(10), dp(18), dp(10), dp(4));
+                  LinearLayout titleRow = new LinearLayout(this);
+                  titleRow.setOrientation(LinearLayout.HORIZONTAL);
+                  titleRow.setGravity(Gravity.CENTER_VERTICAL);
+                  TextView title = tv("رسام تلقائي", 34, TXT, false);
+                  title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                  titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+                  TextView ver = tv("الإصدار 9", 12, TXT, true);
+                  ver.setPadding(dp(12), dp(5), dp(12), dp(5));
+                  ver.setBackground(glass(dp(20), 0x33FFFFFF, 0x14FFFFFF, 0x5CFFFFFF, dp(12)));
+                  titleRow.addView(ver);
+                  head.addView(titleRow);
+                  TextView subtitle = tv("حوّل أي صورة إلى رسم بخطوط نظيفة، وارسمها تلقائياً داخل اللعبة", 14.5f, TXT2, false);
+                  subtitle.setPadding(0, dp(4), 0, 0);
+                  head.addView(subtitle);
+                  col.addView(head);
+                  animated.add(head);
+
+                  // --- مجموعة: البداية ---
+                  col.addView(sectionTitle("البداية"));
+                  LinearLayout g1 = group();
+
+                  statusDot = new View(this);
+                  GradientDrawable dot = new GradientDrawable();
+                  dot.setShape(GradientDrawable.OVAL);
+                  dot.setColor(RED);
+                  statusDot.setBackground(dot);
+                  LinearLayout trail1 = new LinearLayout(this);
+                  trail1.setOrientation(LinearLayout.HORIZONTAL);
+                  trail1.setGravity(Gravity.CENTER_VERTICAL);
+                  LinearLayout.LayoutParams dp1 = new LinearLayout.LayoutParams(dp(10), dp(10));
+                  dp1.setMarginEnd(dp(8));
+                  trail1.addView(statusDot, dp1);
+                  trail1.addView(tv("‹", 24, 0x66FFFFFF, false));
+
+                  serviceRow = makeRow("⚙️", 0xFF34C759, 0xFF248A3D, "تفعيل خدمة الرسم", "", trail1);
+                  pressable(serviceRow.v, () -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+                  g1.addView(serviceRow.v);
+                  g1.addView(divider());
+
+                  imageRow = makeRow("🖼️", 0xFF0A84FF, 0xFF0040DD, "اختيار صورة", "اختر صورة من المعرض",
+                          tv("‹", 24, 0x66FFFFFF, false));
+                  pressable(imageRow.v, this::pickImage);
+                  g1.addView(imageRow.v);
+                  col.addView(g1);
+                  animated.add(g1);
+
+                  // --- مجموعة: الإعدادات ---
+                  col.addView(sectionTitle("الإعدادات"));
+                  LinearLayout g2 = group();
+
+                  detailValue = tv("", 14, TXT2, false);
                   detail = new SeekBar(this);
                   detail.setMax(100);
-                  detail.setProgress(55);
+                  detail.setProgress(prefs.getInt("detail", 55));
+                  tintSeek(detail);
                   detail.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                      @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {}
+                      @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {
+                          detailValue.setText(p + "%");
+                      }
                       @Override public void onStartTrackingTouch(SeekBar sb) {}
-                      @Override public void onStopTrackingTouch(SeekBar sb) { process(); }
+                      @Override public void onStopTrackingTouch(SeekBar sb) {
+                          prefs.edit().putInt("detail", sb.getProgress()).apply();
+                          process();
+                      }
                   });
+                  detailValue.setText(detail.getProgress() + "%");
+                  g2.addView(sliderBlock("مستوى التفاصيل", detailValue, detail));
+                  g2.addView(divider());
 
-                  speedLabel = new TextView(this);
+                  speedValue = tv("", 14, TXT2, false);
                   speed = new SeekBar(this);
                   speed.setMax(100);
-                  speed.setProgress(25);
+                  speed.setProgress(prefs.getInt("speed", 25));
+                  tintSeek(speed);
                   speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                       @Override public void onProgressChanged(SeekBar sb, int p, boolean user) { updateInfo(); }
                       @Override public void onStartTrackingTouch(SeekBar sb) {}
-                      @Override public void onStopTrackingTouch(SeekBar sb) {}
+                      @Override public void onStopTrackingTouch(SeekBar sb) {
+                          prefs.edit().putInt("speed", sb.getProgress()).apply();
+                      }
+                  });
+                  g2.addView(sliderBlock("سرعة الرسم", speedValue, speed));
+                  g2.addView(divider());
+
+                  humanSwitch = new Switch(this);
+                  humanSwitch.setChecked(prefs.getBoolean("human", true));
+                  int[][] st = {{android.R.attr.state_checked}, {}};
+                  humanSwitch.setTrackTintList(new ColorStateList(st, new int[]{GREEN, 0x55FFFFFF}));
+                  humanSwitch.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+                  humanSwitch.setOnCheckedChangeListener((b, on) -> {
+                      b.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                      prefs.edit().putBoolean("human", on).apply();
+                  });
+                  Row humanRow = makeRow("✋", 0xFFFF9F0A, 0xFFD97700, "رسم بشري",
+                          "سرعة متغيّرة وتوقفات طبيعية", humanSwitch);
+                  humanRow.v.setOnClickListener(v -> humanSwitch.toggle());
+                  g2.addView(humanRow.v);
+                  col.addView(g2);
+                  animated.add(g2);
+
+                  // --- المعاينة ---
+                  col.addView(sectionTitle("المعاينة"));
+                  FrameLayout pv = new FrameLayout(this);
+                  pv.setBackground(card(dp(24)));
+                  pv.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  preview = new ImageView(this);
+                  preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  preview.setPadding(dp(6), dp(6), dp(6), dp(6));
+                  setPreviewEmpty(true);
+                  pv.addView(preview, new FrameLayout.LayoutParams(-1, -1));
+                  placeholder = tv("🖼️\nاضغط لاختيار صورة", 15, TXT2, false);
+                  placeholder.setGravity(Gravity.CENTER);
+                  pv.addView(placeholder, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+                  pressable(pv, this::pickImage);
+                  col.addView(pv, new LinearLayout.LayoutParams(-1, dp(280)));
+                  animated.add(pv);
+
+                  // --- شريحتان: عدد الخطوط والزمن ---
+                  LinearLayout chips = new LinearLayout(this);
+                  chips.setOrientation(LinearLayout.HORIZONTAL);
+                  strokesChip = chip("✎  —");
+                  timeChip = chip("⏱  —");
+                  LinearLayout.LayoutParams c1 = new LinearLayout.LayoutParams(0, -2, 1f);
+                  c1.setMarginEnd(dp(6));
+                  LinearLayout.LayoutParams c2 = new LinearLayout.LayoutParams(0, -2, 1f);
+                  c2.setMarginStart(dp(6));
+                  chips.addView(strokesChip, c1);
+                  chips.addView(timeChip, c2);
+                  LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
+                  cp.topMargin = dp(12);
+                  col.addView(chips, cp);
+
+                  info = tv("", 12.5f, TXT2, false);
+                  info.setGravity(Gravity.CENTER);
+                  info.setPadding(dp(10), dp(12), dp(10), 0);
+                  col.addView(info);
+
+                  TextView tip = tv("💡 بعد الضغط على «ابدأ» افتح اللعبة ثم اضغط زر 🎨 العائم", 12.5f, TXT2, false);
+                  tip.setGravity(Gravity.CENTER);
+                  tip.setPadding(dp(10), dp(10), dp(10), 0);
+                  col.addView(tip);
+
+                  // --- شريط الزر السفلي الثابت ---
+                  final FrameLayout bar = new FrameLayout(this);
+                  GradientDrawable fade = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{0x00070B1E, 0xE6070B1E});
+                  bar.setBackground(fade);
+                  startBtn = tv("ابدأ الرسم  ▶", 17, TXT, false);
+                  startBtn.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                  startBtn.setGravity(Gravity.CENTER);
+                  startBtn.setBackground(glass(dp(30), 0xE60A84FF, 0xCC5E5CE6, 0x99FFFFFF, dp(30)));
+                  pressable(startBtn, this::start);
+                  bar.addView(startBtn, new FrameLayout.LayoutParams(-1, dp(58)));
+                  root.addView(bar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+
+                  // هوامش الشاشة (شريط الحالة وشريط التنقل)
+                  root.setOnApplyWindowInsetsListener((v, ins) -> {
+                      int top = ins.getSystemWindowInsetTop();
+                      int bot = ins.getSystemWindowInsetBottom();
+                      scroll.setPadding(dp(16), top + dp(6), dp(16), bot + dp(120));
+                      bar.setPadding(dp(20), dp(34), dp(20), bot + dp(14));
+                      return ins;
                   });
 
-                  humanBox = new CheckBox(this);
-                  humanBox.setText("رسم بشري (سرعة متغيّرة وتوقفات طبيعية)");
-                  humanBox.setChecked(true);
-
-                  preview = new ImageView(this);
-                  preview.setBackgroundColor(Color.WHITE);
-                  preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-
-                  info = new TextView(this);
-
-                  Button b3 = new Button(this);
-                  b3.setText("3) ابدأ");
-                  b3.setOnClickListener(v -> start());
-
-                  root.addView(ver);
-                  root.addView(b1);
-                  root.addView(b2);
-                  root.addView(t1);
-                  root.addView(detail);
-                  root.addView(speedLabel);
-                  root.addView(speed);
-                  root.addView(humanBox);
-                  root.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-                  root.addView(info);
-                  root.addView(b3);
                   setContentView(root);
+                  root.requestApplyInsets();
+
+                  // دخول متدرّج ناعم للبطاقات
+                  for (int i = 0; i < animated.size(); i++) {
+                      View a = animated.get(i);
+                      a.setAlpha(0f);
+                      a.setTranslationY(dp(26));
+                      a.animate().alpha(1f).translationY(0).setStartDelay(80L * i).setDuration(450)
+                              .setInterpolator(new DecelerateInterpolator()).start();
+                  }
                   updateInfo();
+              }
+
+              TextView chip(String s) {
+                  TextView t = tv(s, 14, TXT, true);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(8), dp(12), dp(8), dp(12));
+                  t.setBackground(glass(dp(18), 0x33FFFFFF, 0x14FFFFFF, 0x5CFFFFFF, dp(20)));
+                  return t;
+              }
+
+              void setPreviewEmpty(boolean empty) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setCornerRadius(dp(18));
+                  if (empty) {
+                      g.setColor(0x14FFFFFF);
+                      g.setStroke(dp(1), 0x66FFFFFF, dp(6), dp(5));
+                  } else {
+                      g.setColor(0xFFFFFFFF);
+                  }
+                  preview.setBackground(g);
+                  preview.setClipToOutline(true);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  refreshService();
+              }
+
+              void refreshService() {
+                  boolean on = DrawService.instance != null;
+                  ((GradientDrawable) statusDot.getBackground()).setColor(on ? GREEN : RED);
+                  serviceRow.sub.setText(on ? "الخدمة مفعّلة ✓" : "غير مفعّلة، اضغط للتفعيل");
+                  serviceRow.sub.setTextColor(on ? 0xFF7DDC98 : 0xFFFF8A80);
+              }
+
+              void pickImage() {
+                  Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                  i.setType("image/*");
+                  startActivityForResult(i, 1);
               }
 
               float currentSpeed() {
@@ -650,6 +1065,8 @@ jobs:
                       c.drawBitmap(scaled, 0, 0, null);
                       pixels = new int[pw * ph];
                       flat.getPixels(pixels, 0, pw, 0, 0, pw, ph);
+                      imageRow.sub.setText("تم اختيار الصورة ✓  (اضغط للتغيير)");
+                      imageRow.sub.setTextColor(0xFF7DDC98);
                       process();
                   } catch (Exception e) {
                       Toast.makeText(this, "تعذر فتح الصورة", Toast.LENGTH_SHORT).show();
@@ -663,14 +1080,20 @@ jobs:
                   final int[] px = pixels;
                   final int w = pw, h = ph;
                   info.setText("جارٍ استخراج الخطوط...");
+                  strokesChip.setText("✎  …");
+                  timeChip.setText("⏱  …");
                   new Thread(() -> {
                       try {
                           final Tracer.Result r = Tracer.trace(px, w, h, d);
-                          final Bitmap pv = render(r);
+                          final Bitmap pvb = render(r);
                           runOnUiThread(() -> {
                               if (id != jobId) return;
                               result = r;
-                              preview.setImageBitmap(pv);
+                              setPreviewEmpty(false);
+                              placeholder.setVisibility(View.GONE);
+                              preview.setAlpha(0f);
+                              preview.setImageBitmap(pvb);
+                              preview.animate().alpha(1f).setDuration(300).start();
                               updateInfo();
                           });
                       } catch (Throwable t) {
@@ -700,11 +1123,16 @@ jobs:
 
               void updateInfo() {
                   float sp = currentSpeed();
-                  speedLabel.setText("سرعة الرسم: " + (int) sp + " بكسل/ثانية  (الأقل = أبطأ)");
-                  if (result == null) return;
+                  speedValue.setText((int) sp + " بكسل/ث");
+                  if (result == null) {
+                      info.setText("الأقل = أبطأ في سرعة الرسم");
+                      return;
+                  }
                   int secs = (int) (result.totalLen * 1.5f / sp);
-                  String t = secs >= 60 ? (secs / 60) + " دقيقة تقريباً" : secs + " ثانية تقريباً";
-                  info.setText("عدد الخطوط: " + result.strokes.size() + "  |  الزمن: " + t);
+                  String t = secs >= 60 ? (secs / 60) + " دقيقة" : secs + " ثانية";
+                  strokesChip.setText("✎  " + result.strokes.size() + " خط");
+                  timeChip.setText("⏱  ≈ " + t);
+                  info.setText("اضغط على المعاينة لتغيير الصورة");
               }
 
               void start() {
@@ -721,7 +1149,7 @@ jobs:
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
                   DrawService.speed = currentSpeed();
-                  DrawService.human = humanBox.isChecked();
+                  DrawService.human = humanSwitch.isChecked();
                   DrawService.instance.showFab();
                   Toast.makeText(this, "افتح اللعبة ثم اضغط زر 🎨", Toast.LENGTH_LONG).show();
                   moveTaskToBack(true);
