@@ -63,8 +63,9 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.VIBRATE" />
               <application
-                  android:label="رسام تلقائي"
+                  android:label="الرسم التلقائي "
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
@@ -72,11 +73,16 @@ jobs:
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="image/*" />
+                      </intent-filter>
                   </activity>
                   <service
                       android:name=".DrawService"
                       android:exported="true"
-                      android:label="رسام تلقائي"
+                      android:label="الرسم التلقائي "
                       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
                       <intent-filter>
                           <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -779,6 +785,9 @@ jobs:
               View statusDot;
               SeekBar detail, speed;
               Switch humanSwitch, fillSwitch;
+              Switch invertSwitch, flipSwitch, topDownSwitch, vibrateSwitch;
+              SeekBar contrastSeek, minLenSeek, startDelaySeek;
+              TextView contrastValue, minLenValue, startDelayValue;
               int jobId = 0;
               SharedPreferences prefs;
               BgView bg;
@@ -1022,10 +1031,10 @@ jobs:
                   LinearLayout titleRow = new LinearLayout(this);
                   titleRow.setOrientation(LinearLayout.HORIZONTAL);
                   titleRow.setGravity(Gravity.CENTER_VERTICAL);
-                  TextView title = tv("رسام تلقائي", 34, TXT, false);
+                  TextView title = tv("الرسم التلقائي ", 34, TXT, false);
                   title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
                   titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
-                  TextView ver = tv("الإصدار 10", 12, TXT, true);
+                  TextView ver = tv("الإصدار 11", 12, TXT, true);
                   ver.setPadding(dp(12), dp(5), dp(12), dp(5));
                   ver.setBackground(glass(dp(20), 0x33FFFFFF, 0x14FFFFFF, 0x5CFFFFFF, dp(12)));
                   titleRow.addView(ver);
@@ -1124,7 +1133,7 @@ jobs:
                       prefs.edit().putBoolean("human", on).apply();
                   });
                   Row humanRow = makeRow("✋", 0xFFFF9F0A, 0xFFD97700, "رسم بشري",
-                          "سرعة متغيّرة وتوقفات طبيعية", humanSwitch);
+                          "سرعة متغيره ( لن يتم اكتشاف التطبيق يرسم ) ", humanSwitch);
                   humanRow.v.setOnClickListener(v -> humanSwitch.toggle());
                   g2.addView(humanRow.v);
                   g2.addView(divider());
@@ -1144,6 +1153,76 @@ jobs:
                   g2.addView(fillRow.v);
                   col.addView(g2);
                   animated.add(g2);
+
+                  // --- مجموعة: خيارات الصورة (إضافات 1-4) ---
+                  col.addView(sectionTitle("خيارات الصورة"));
+                  LinearLayout g3 = group();
+
+                  // إضافة 1: عكس الألوان
+                  invertSwitch = makeSwitch("invert", false, true);
+                  Row invertRow = makeRow("🌓", 0xFF636366, 0xFF3A3A3C, "عكس الألوان",
+                          "للرسومات الفاتحة على خلفية داكنة", invertSwitch);
+                  invertRow.v.setOnClickListener(v -> invertSwitch.toggle());
+                  g3.addView(invertRow.v);
+                  g3.addView(divider());
+
+                  // إضافة 2: قلب أفقي
+                  flipSwitch = makeSwitch("flip", false, true);
+                  Row flipRow = makeRow("↔️", 0xFF5E5CE6, 0xFF3634A3, "قلب أفقي",
+                          "يعكس الصورة يميناً ويساراً", flipSwitch);
+                  flipRow.v.setOnClickListener(v -> flipSwitch.toggle());
+                  g3.addView(flipRow.v);
+                  g3.addView(divider());
+
+                  // إضافة 3: تدوير الصورة 90 درجة
+                  Row rotRow = makeRow("🔄", 0xFF0A84FF, 0xFF0040DD, "تدوير الصورة",
+                          "90° مع عقارب الساعة", tv("‹", 24, 0x66FFFFFF, false));
+                  pressable(rotRow.v, this::rotateImage);
+                  g3.addView(rotRow.v);
+                  g3.addView(divider());
+
+                  // إضافة 4: التباين
+                  contrastValue = tv("", 14, TXT2, false);
+                  contrastSeek = makeSeek(100, "contrast", 50, contrastValue,
+                          p -> p == 50 ? "عادي" : (p > 50 ? "+" : "") + (p - 50), true);
+                  g3.addView(sliderBlock("التباين", contrastValue, contrastSeek));
+                  col.addView(g3);
+                  animated.add(g3);
+
+                  // --- مجموعة: خيارات متقدمة (إضافات 5-8) ---
+                  col.addView(sectionTitle("خيارات متقدمة"));
+                  LinearLayout g4 = group();
+
+                  // إضافة 5: تجاهل الخطوط الصغيرة
+                  minLenValue = tv("", 14, TXT2, false);
+                  minLenSeek = makeSeek(60, "minlen", 0, minLenValue,
+                          p -> p == 0 ? "بدون" : p + " بكسل", false);
+                  g4.addView(sliderBlock("تجاهل الخطوط الصغيرة", minLenValue, minLenSeek));
+                  g4.addView(divider());
+
+                  // إضافة 6: مهلة البدء قبل الرسم
+                  startDelayValue = tv("", 14, TXT2, false);
+                  startDelaySeek = makeSeek(10, "startdelay", 3, startDelayValue,
+                          p -> (p * 0.5f) + " ث", false);
+                  g4.addView(sliderBlock("مهلة البدء", startDelayValue, startDelaySeek));
+                  g4.addView(divider());
+
+                  // إضافة 7: الرسم من الأعلى إلى الأسفل
+                  topDownSwitch = makeSwitch("topdown", false, false);
+                  Row topRow = makeRow("⬇️", 0xFF30D158, 0xFF248A3D, "الرسم من الأعلى للأسفل",
+                          "ترتيب الخطوط حسب موقعها على اللوحة", topDownSwitch);
+                  topRow.v.setOnClickListener(v -> topDownSwitch.toggle());
+                  g4.addView(topRow.v);
+                  g4.addView(divider());
+
+                  // إضافة 8: اهتزاز عند انتهاء الرسم
+                  vibrateSwitch = makeSwitch("vibrate", true, false);
+                  Row vibRow = makeRow("📳", 0xFFFF9F0A, 0xFFD97700, "اهتزاز عند الانتهاء",
+                          "تنبيه عند اكتمال الرسمة", vibrateSwitch);
+                  vibRow.v.setOnClickListener(v -> vibrateSwitch.toggle());
+                  g4.addView(vibRow.v);
+                  col.addView(g4);
+                  animated.add(g4);
 
                   // --- المعاينة ---
                   col.addView(sectionTitle("المعاينة"));
@@ -1236,6 +1315,47 @@ jobs:
                       i.removeExtra("paywall");
                       showCodeDialog(!License.canUse(this));
                   }
+                  // إضافة 9: استقبال صورة مُشاركة من المعرض أو أي تطبيق آخر
+                  if (i != null && Intent.ACTION_SEND.equals(i.getAction())
+                          && i.getType() != null && i.getType().startsWith("image/")) {
+                      Uri shared = i.getParcelableExtra(Intent.EXTRA_STREAM);
+                      i.setAction(Intent.ACTION_MAIN);
+                      if (shared != null) load(shared);
+                  }
+              }
+
+              Switch makeSwitch(final String key, boolean def, final boolean reprocess) {
+                  Switch sw = new Switch(this);
+                  sw.setChecked(prefs.getBoolean(key, def));
+                  int[][] states = {{android.R.attr.state_checked}, {}};
+                  sw.setTrackTintList(new ColorStateList(states, new int[]{GREEN, 0x55FFFFFF}));
+                  sw.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+                  sw.setOnCheckedChangeListener((b, on) -> {
+                      b.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                      prefs.edit().putBoolean(key, on).apply();
+                      if (reprocess) process();
+                  });
+                  return sw;
+              }
+
+              SeekBar makeSeek(int max, final String key, int def, final TextView out,
+                               final java.util.function.IntFunction<String> fmt, final boolean reprocess) {
+                  SeekBar sb = new SeekBar(this);
+                  sb.setMax(max);
+                  sb.setProgress(prefs.getInt(key, def));
+                  tintSeek(sb);
+                  out.setText(fmt.apply(sb.getProgress()));
+                  sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar s, int p, boolean user) {
+                          out.setText(fmt.apply(p));
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar s) {}
+                      @Override public void onStopTrackingTouch(SeekBar s) {
+                          prefs.edit().putInt(key, s.getProgress()).apply();
+                          if (reprocess) process();
+                      }
+                  });
+                  return sb;
               }
 
               void refreshLicense() {
@@ -1387,6 +1507,72 @@ jobs:
                   startActivityForResult(i, 1);
               }
 
+              /** تدوير الصورة 90 درجة مع عقارب الساعة */
+              void rotateImage() {
+                  if (pixels == null) {
+                      Toast.makeText(this, "اختر صورة أولاً", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  int[] out = new int[pixels.length];
+                  for (int y = 0; y < ph; y++) {
+                      for (int x = 0; x < pw; x++) {
+                          out[x * ph + (ph - 1 - y)] = pixels[y * pw + x];
+                      }
+                  }
+                  pixels = out;
+                  int t = pw;
+                  pw = ph;
+                  ph = t;
+                  process();
+              }
+
+              int clamp255(int v) {
+                  return v < 0 ? 0 : Math.min(v, 255);
+              }
+
+              /** تعديلات ما قبل الاستخراج: التباين، عكس الألوان، قلب أفقي (لا تغيّر الصورة الأصلية) */
+              int[] adjust(int[] src, int w, int h, boolean invert, boolean flip, int contrastP) {
+                  if (!invert && !flip && contrastP == 50) return src;
+                  float f = (float) Math.pow(2.5, (contrastP - 50) / 50.0);
+                  int[] out = new int[src.length];
+                  for (int y = 0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          int c = src[y * w + (flip ? w - 1 - x : x)];
+                          int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+                          if (contrastP != 50) {
+                              r = clamp255((int) ((r - 128) * f + 128));
+                              g = clamp255((int) ((g - 128) * f + 128));
+                              b = clamp255((int) ((b - 128) * f + 128));
+                          }
+                          if (invert) {
+                              r = 255 - r;
+                              g = 255 - g;
+                              b = 255 - b;
+                          }
+                          out[y * w + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                      }
+                  }
+                  return out;
+              }
+
+              float strokeLen(float[] s) {
+                  float len = 0;
+                  for (int k = 2; k < s.length; k += 2) len += (float) Math.hypot(s[k] - s[k - 2], s[k + 1] - s[k - 1]);
+                  return len;
+              }
+
+              /** إزالة الخطوط الأقصر من الحد المختار (خطوط التعبئة لا تُمسّ) */
+              List<float[]> filterStrokes(Tracer.Result r) {
+                  int min = minLenSeek.getProgress();
+                  if (min <= 0) return r.strokes;
+                  List<float[]> out = new ArrayList<>();
+                  for (int i = 0; i < r.strokes.size(); i++) {
+                      float[] s = r.strokes.get(i);
+                      if (i < r.fillCount || strokeLen(s) >= min) out.add(s);
+                  }
+                  return out.isEmpty() ? r.strokes : out;
+              }
+
               float currentSpeed() {
                   return 60f + speed.getProgress() * 4f;
               }
@@ -1439,12 +1625,15 @@ jobs:
                   final boolean fl = fillSwitch.isChecked();
                   final int[] px = pixels;
                   final int w = pw, h = ph;
+                  final boolean inv = invertSwitch.isChecked();
+                  final boolean flp = flipSwitch.isChecked();
+                  final int con = contrastSeek.getProgress();
                   info.setText("جارٍ استخراج الخطوط...");
                   strokesChip.setText("✎  …");
                   timeChip.setText("⏱  …");
                   new Thread(() -> {
                       try {
-                          final Tracer.Result r = Tracer.trace(px, w, h, d, fl);
+                          final Tracer.Result r = Tracer.trace(adjust(px, w, h, inv, flp, con), w, h, d, fl);
                           final Bitmap pvb = render(r);
                           runOnUiThread(() -> {
                               if (id != jobId) return;
@@ -1512,11 +1701,14 @@ jobs:
                       startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                       return;
                   }
-                  DrawService.strokes = result.strokes;
+                  DrawService.strokes = filterStrokes(result);
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
                   DrawService.speed = currentSpeed();
                   DrawService.human = humanSwitch.isChecked();
+                  DrawService.topDown = topDownSwitch.isChecked();
+                  DrawService.vibrateOnFinish = vibrateSwitch.isChecked();
+                  DrawService.startDelayMs = startDelaySeek.getProgress() * 500L;
                   DrawService.instance.showFab();
                   Toast.makeText(this, "افتح اللعبة ثم اضغط زر 🎨", Toast.LENGTH_LONG).show();
                   moveTaskToBack(true);
@@ -1544,6 +1736,8 @@ jobs:
           import android.os.Build;
           import android.os.Handler;
           import android.os.Looper;
+          import android.os.VibrationEffect;
+          import android.os.Vibrator;
           import android.view.Gravity;
           import android.view.MotionEvent;
           import android.view.View;
@@ -1567,6 +1761,9 @@ jobs:
               static float imgW, imgH;
               static float speed = 160f;
               static boolean human = true;
+              static boolean topDown = false;          // الرسم من الأعلى إلى الأسفل
+              static boolean vibrateOnFinish = true;   // اهتزاز عند انتهاء الرسم
+              static long startDelayMs = 1500;         // مهلة ما قبل البدء
 
               static class Piece {
                   float[] pts;
@@ -1596,6 +1793,7 @@ jobs:
               protected void onServiceConnected() {
                   instance = this;
                   wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  delayMs = Math.max(0, Math.min(3000, getSharedPreferences("ad", MODE_PRIVATE).getInt("delay", 150)));
               }
 
               @Override public void onAccessibilityEvent(AccessibilityEvent e) {}
@@ -1795,7 +1993,9 @@ jobs:
                           dl.setText(delayText(delayMs));
                       }
                       @Override public void onStartTrackingTouch(SeekBar s) {}
-                      @Override public void onStopTrackingTouch(SeekBar s) {}
+                      @Override public void onStopTrackingTouch(SeekBar s) {
+                          getSharedPreferences("ad", MODE_PRIVATE).edit().putInt("delay", delayMs).apply();
+                      }
                   });
                   m.addView(sb, lpw(0, 0, 0, 0, 0));
 
@@ -2192,7 +2392,7 @@ jobs:
                           finishDraw("خطأ");
                       }
                   };
-                  h.postDelayed(pendingBegin, 1500);
+                  h.postDelayed(pendingBegin, startDelayMs);
               }
 
               void showFrame(float ox, float oy, float w, float hh) {
@@ -2264,6 +2464,9 @@ jobs:
                       }
                       screen.add(t);
                   }
+                  if (topDown) {
+                      screen.sort((a, b) -> Float.compare(a[1], b[1]));
+                  }
                   if (human) {
                       // الإنسان يرسم الخطوط العامة الطويلة أولاً ثم التفاصيل
                       List<float[]> big = new ArrayList<>();
@@ -2323,12 +2526,20 @@ jobs:
                   return out;
               }
 
+              void buzz() {
+                  try {
+                      Vibrator vb = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      if (vb != null) vb.vibrate(VibrationEffect.createOneShot(250, VibrationEffect.DEFAULT_AMPLITUDE));
+                  } catch (Exception e) {}
+              }
+
               void finishDraw(String msg) {
                   drawing = false;
                   cancel = false;
                   paused = false;
                   loopWaiting = false;
                   setFab(okCount + "✓\n" + failCount + "✗", 11);
+                  if (vibrateOnFinish && msg.startsWith("انتهى")) buzz();
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
                   // انتهت المحاولات المجانية: تظهر النافذة المنبثقة
                   if (!License.canUse(this)) h.postDelayed(this::showPaywall, 1500);
