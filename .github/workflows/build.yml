@@ -65,7 +65,7 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.VIBRATE" />
               <application
-                  android:label="الرسم التلقائي "
+                  android:label="رسام تلقائي"
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
@@ -82,7 +82,7 @@ jobs:
                   <service
                       android:name=".DrawService"
                       android:exported="true"
-                      android:label="الرسم التلقائي "
+                      android:label="رسام تلقائي"
                       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
                       <intent-filter>
                           <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -119,19 +119,31 @@ jobs:
           import java.util.Arrays;
           import java.util.List;
 
-          /** استخراج خطوط نظيفة من صورة: Canny + تنحيف + تتبع مستمر للخطوط. بدون أي اعتماد على أندرويد. */
+          /** استخراج خطوط بدقة عالية مع الحفاظ على الخطوط وتكرار الداكن مرتين والرفيع مرة واحدة. */
           class Tracer {
+              static class StrokeItem {
+                  float[] pts;
+                  int repeats; // 2 للأسود الداكن، 1 للخط الرفيع العادي
+
+                  StrokeItem(float[] pts, int repeats) {
+                      this.pts = pts;
+                      this.repeats = Math.max(1, repeats);
+                  }
+              }
+
               static class Result {
                   List<float[]> strokes = new ArrayList<>();
+                  List<StrokeItem> items = new ArrayList<>();
                   int w, h;
                   float totalLen;
-                  int fillCount;   // أول fillCount خط هي خطوط تعبئة الأسود/الظلال
-                  float fillW;     // المسافة بين خطوط التعبئة (للمعاينة)
+                  int totalRepeats;
+                  int fillCount;
+                  float fillW;
               }
 
               static final int[] DX = {1, 1, 0, -1, -1, -1, 0, 1};
               static final int[] DY = {0, 1, 1, 1, 0, -1, -1, -1};
-              static final int GAP = 4;
+              static final int GAP = 5;
 
               static class IL {
                   int[] a = new int[64];
@@ -160,8 +172,8 @@ jobs:
                       gray[i] = 0.299f * r + 0.587f * g + 0.114f * b;
                   }
 
-                  // 2) تنعيم غاوسي (تفاصيل أقل = تنعيم أكبر)
-                  float[] bl = blur(gray, w, h, 2.0f - 1.0f * d);
+                  // 2) تنعيم غاوسي خفيف جداً للحفاظ على الخطوط الرفيعة دون ضياع
+                  float[] bl = blur(gray, w, h, 1.15f - 0.55f * d);
 
                   // 3) Sobel
                   float[] gx = new float[n], gy = new float[n], mag = new float[n];
@@ -180,18 +192,18 @@ jobs:
                   }
                   if (maxMag <= 0) return res;
 
-                  // عتبات تلقائية من توزيع قوة الحواف
+                  // عتبات حساسة لعدم ترك الخطوط الخفيفة أو الداكنة
                   int[] hist = new int[1024];
                   for (int i = 0; i < n; i++) hist[Math.min(1023, (int) (mag[i] / maxMag * 1023))]++;
-                  long target = (long) (n * 0.985), acc = 0;
+                  long target = (long) (n * 0.99f), acc = 0;
                   int bin = 0;
                   for (; bin < 1024; bin++) {
                       acc += hist[bin];
                       if (acc >= target) break;
                   }
                   float pv = (Math.min(bin, 1023) + 1) / 1024f * maxMag;
-                  float high = pv * (0.55f - 0.42f * d);
-                  float low = high * 0.4f;
+                  float high = Math.max(8f, pv * (0.36f - 0.25f * d));
+                  float low = high * 0.35f;
 
                   // 4) NMS + hysteresis
                   boolean[] cand = new boolean[n];
@@ -243,24 +255,24 @@ jobs:
                       }
                   }
 
-                  // 7) تصفية القصير + تبسيط
-                  int minLen = (int) (8 + (100 - detail) * 0.35f);
+                  // 7) الاحتفاظ بالخطوط دون حذف الخطوط الصغيرة المهمة
+                  int minLen = Math.max(2, (int) (3 + (100 - detail) * 0.05f));
                   List<float[]> strokes = new ArrayList<>();
                   for (IL p : raw) {
                       int cnt = p.n / 2;
                       if (cnt < minLen) continue;
-                      float[] s = simplify(p, 0.9f);
+                      float[] s = simplify(p, 0.55f);
                       if (s.length < 4) continue;
                       strokes.add(s);
                   }
 
-                  // 7ب) تعبئة المساحات السوداء والظلال كما هي (بدل الاكتفاء بالإطار الخارجي)
+                  // 7ب) تعبئة المساحات السوداء والظلال كما هي عند التفعيل
                   int fsp = Math.max(2, Math.round(5f - 2.5f * d));
                   List<float[]> fills = new ArrayList<>();
                   if (fill) fills = fillStrokes(bl, w, h, fsp);
                   if (strokes.isEmpty() && fills.isEmpty()) return res;
 
-                  // حساب الحدود وقص الهوامش الفارغة: الرسم يملأ اللوحة بأكبر حجم ممكن
+                  // حساب الحدود وقص الهوامش الفارغة
                   float[] bb = {1e9f, 1e9f, -1e9f, -1e9f};
                   grow(strokes, bb);
                   grow(fills, bb);
@@ -269,20 +281,61 @@ jobs:
                   res.w = (int) Math.ceil(bb[2] - bb[0]) + 1;
                   res.h = (int) Math.ceil(bb[3] - bb[1]) + 1;
 
-                  // 8) ترتيب الخطوط بالأقرب فالأقرب: التعبئة أولاً ثم الخطوط الخارجية فوقها
-                  List<float[]> all = new ArrayList<>(order(fills));
-                  all.addAll(order(strokes));
-                  res.fillCount = fills.size();
+                  // ترتيب متسلسل طبيعي دون قفز عشوائي بعيد
+                  List<float[]> orderedFills = sequentialOrder(fills);
+                  List<float[]> orderedStrokes = sequentialOrder(strokes);
+
+                  List<float[]> all = new ArrayList<>(orderedFills);
+                  all.addAll(orderedStrokes);
+                  res.fillCount = orderedFills.size();
                   res.fillW = fsp;
                   res.strokes = all;
+
+                  List<StrokeItem> items = new ArrayList<>();
                   float total = 0;
-                  for (float[] s : res.strokes) {
+                  int repsSum = 0;
+
+                  // خطوط التعبئة تُرسم مرة واحدة لتجنب التراكم المفرط
+                  for (float[] s : orderedFills) {
+                      items.add(new StrokeItem(s, 1));
+                      repsSum += 1;
                       for (int k = 2; k < s.length; k += 2) {
                           total += (float) Math.hypot(s[k] - s[k - 2], s[k + 1] - s[k - 1]);
                       }
                   }
+
+                  // الخطوط المستخرجة: الداكنة مرتين، والرفيعة العادية مرة واحدة
+                  for (float[] s : orderedStrokes) {
+                      int reps = isDarkLine(s, gray, w, h, bb[0], bb[1]) ? 2 : 1;
+                      items.add(new StrokeItem(s, reps));
+                      repsSum += reps;
+                      float slen = 0;
+                      for (int k = 2; k < s.length; k += 2) {
+                          slen += (float) Math.hypot(s[k] - s[k - 2], s[k + 1] - s[k - 1]);
+                      }
+                      total += slen * reps;
+                  }
+
+                  res.items = items;
                   res.totalLen = total;
+                  res.totalRepeats = repsSum;
                   return res;
+              }
+
+              /** يحدد هل الخط أسود داكن (يتكرر مرتين) أم خط رفيع عادي (يتكرر مرة واحدة) */
+              static boolean isDarkLine(float[] pts, float[] gray, int w, int h, float offX, float offY) {
+                  if (pts == null || pts.length < 4 || gray == null || w <= 0 || h <= 0) return false;
+                  float sum = 0;
+                  int count = 0;
+                  for (int k = 0; k < pts.length; k += 2) {
+                      int x = Math.max(0, Math.min(w - 1, Math.round(pts[k] + offX)));
+                      int y = Math.max(0, Math.min(h - 1, Math.round(pts[k + 1] + offY)));
+                      sum += gray[y * w + x];
+                      count++;
+                  }
+                  if (count == 0) return false;
+                  float avgGray = sum / count;
+                  return avgGray < 120f;
               }
 
               static void grow(List<float[]> list, float[] bb) {
@@ -300,7 +353,6 @@ jobs:
                   }
               }
 
-              /** عتبة أوتسو لفصل الداكن عن الفاتح */
               static int otsu(float[] g, int n) {
                   int[] hs = new int[256];
                   for (int i = 0; i < n; i++) hs[Math.max(0, Math.min(255, (int) g[i]))]++;
@@ -322,7 +374,6 @@ jobs:
                   return th;
               }
 
-              /** تآكل مربع بنصف قطر r: يزيل الخطوط الرفيعة ويُبقي المساحات الممتلئة فقط */
               static boolean[] erode(boolean[] m, int w, int h, int r) {
                   boolean[] a = new boolean[w * h], b = new boolean[w * h];
                   for (int y = 0; y < h; y++) {
@@ -348,7 +399,6 @@ jobs:
                   return b;
               }
 
-              /** خطوط تعبئة: كثيفة للأسود، وأخف للرمادي (ظلال القلم) */
               static List<float[]> fillStrokes(float[] g, int w, int h, int sp) {
                   int n = w * h;
                   int t = otsu(g, n);
@@ -367,7 +417,6 @@ jobs:
                   return out;
               }
 
-              /** مسح أفقي للمساحة: كل مقطع يربط بالمقطع التالي تحته في ضربة واحدة متعرجة (أقل رفعات للقلم) */
               static void hatch(boolean[] m, int w, int h, int sp, int off, List<float[]> out) {
                   List<List<int[]>> rows = new ArrayList<>();
                   for (int y = off; y < h - 1; y += sp) {
@@ -423,6 +472,7 @@ jobs:
               }
 
               static float[] blur(float[] src, int w, int h, float sigma) {
+                  if (sigma <= 0.1f) return src.clone();
                   int r = Math.max(1, (int) Math.ceil(sigma * 2.5f));
                   float[] k = new float[2 * r + 1];
                   float sum = 0;
@@ -455,7 +505,6 @@ jobs:
                   return out;
               }
 
-              /** Zhang-Suen */
               static void thin(boolean[] im, int w, int h) {
                   int[] buf = new int[w * h];
                   boolean changed;
@@ -563,7 +612,6 @@ jobs:
                           continue;
                       }
                       if (k < 2) break;
-                      // سدّ فجوة صغيرة بالاتجاه الأمامي
                       int bx = -1, by = -1;
                       float bscore = 1e9f;
                       for (int dy = -GAP; dy <= GAP; dy++) {
@@ -575,7 +623,7 @@ jobs:
                               int ni = ny * w + nx;
                               if (!edge[ni] || used[ni]) continue;
                               float dot = (dx * vx + dy * vy) / dist;
-                              if (dot < 0.6f) continue;
+                              if (dot < 0.55f) continue;
                               float score = dist - dot;
                               if (score < bscore) { bscore = score; bx = nx; by = ny; }
                           }
@@ -586,7 +634,6 @@ jobs:
                   }
               }
 
-              /** Douglas-Peucker */
               static float[] simplify(IL p, float eps) {
                   int n = p.n / 2;
                   boolean[] keep = new boolean[n];
@@ -626,7 +673,8 @@ jobs:
                   return out;
               }
 
-              static List<float[]> order(List<float[]> in) {
+              /** ترتيب متسلسل دون قفزات عشوائية بعيدة */
+              static List<float[]> sequentialOrder(List<float[]> in) {
                   List<float[]> rest = new ArrayList<>(in);
                   List<float[]> out = new ArrayList<>();
                   float cx = 0, cy = 0;
@@ -792,7 +840,6 @@ jobs:
               SharedPreferences prefs;
               BgView bg;
 
-              // ============ خلفية متحركة (شفق ملوّن) خلف الزجاج ============
               class BgView extends View {
                   final Paint base = new Paint();
                   final Paint[] orb = new Paint[5];
@@ -860,7 +907,6 @@ jobs:
                   }
               }
 
-              // ============ أدوات الزجاج ============
               int dp(float v) {
                   return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
               }
@@ -892,7 +938,6 @@ jobs:
                   return t;
               }
 
-              /** ضغط ناعم (تصغير بسيط) + اهتزاز خفيف مثل iOS */
               void pressable(final View v, final Runnable onTap) {
                   v.setClickable(true);
                   v.setOnTouchListener((x, e) -> {
@@ -993,7 +1038,6 @@ jobs:
                   return b;
               }
 
-              // ============ بناء الواجهة ============
               @Override
               protected void onCreate(Bundle s) {
                   super.onCreate(s);
@@ -1024,14 +1068,13 @@ jobs:
 
                   List<View> animated = new ArrayList<>();
 
-                  // --- العنوان الكبير ---
                   LinearLayout head = new LinearLayout(this);
                   head.setOrientation(LinearLayout.VERTICAL);
                   head.setPadding(dp(10), dp(18), dp(10), dp(4));
                   LinearLayout titleRow = new LinearLayout(this);
                   titleRow.setOrientation(LinearLayout.HORIZONTAL);
                   titleRow.setGravity(Gravity.CENTER_VERTICAL);
-                  TextView title = tv("الرسم التلقائي ", 34, TXT, false);
+                  TextView title = tv("رسام تلقائي", 34, TXT, false);
                   title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
                   titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
                   TextView ver = tv("الإصدار 11", 12, TXT, true);
@@ -1045,7 +1088,6 @@ jobs:
                   col.addView(head);
                   animated.add(head);
 
-                  // --- مجموعة: البداية ---
                   col.addView(sectionTitle("البداية"));
                   LinearLayout g1 = group();
 
@@ -1085,14 +1127,13 @@ jobs:
                   col.addView(g1);
                   animated.add(g1);
 
-                  // --- مجموعة: الإعدادات ---
                   col.addView(sectionTitle("الإعدادات"));
                   LinearLayout g2 = group();
 
                   detailValue = tv("", 14, TXT2, false);
                   detail = new SeekBar(this);
                   detail.setMax(100);
-                  detail.setProgress(prefs.getInt("detail", 55));
+                  detail.setProgress(prefs.getInt("detail", 75));
                   tintSeek(detail);
                   detail.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                       @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {
@@ -1133,13 +1174,13 @@ jobs:
                       prefs.edit().putBoolean("human", on).apply();
                   });
                   Row humanRow = makeRow("✋", 0xFFFF9F0A, 0xFFD97700, "رسم بشري",
-                          "سرعة متغيره ( لن يتم اكتشاف التطبيق يرسم ) ", humanSwitch);
+                          "سرعة متغيّرة وتوقفات طبيعية دون ترك الخطوط", humanSwitch);
                   humanRow.v.setOnClickListener(v -> humanSwitch.toggle());
                   g2.addView(humanRow.v);
                   g2.addView(divider());
 
                   fillSwitch = new Switch(this);
-                  fillSwitch.setChecked(prefs.getBoolean("fill", true));
+                  fillSwitch.setChecked(prefs.getBoolean("fill", false));
                   fillSwitch.setTrackTintList(new ColorStateList(st, new int[]{GREEN, 0x55FFFFFF}));
                   fillSwitch.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
                   fillSwitch.setOnCheckedChangeListener((b, on) -> {
@@ -1154,11 +1195,9 @@ jobs:
                   col.addView(g2);
                   animated.add(g2);
 
-                  // --- مجموعة: خيارات الصورة (إضافات 1-4) ---
                   col.addView(sectionTitle("خيارات الصورة"));
                   LinearLayout g3 = group();
 
-                  // إضافة 1: عكس الألوان
                   invertSwitch = makeSwitch("invert", false, true);
                   Row invertRow = makeRow("🌓", 0xFF636366, 0xFF3A3A3C, "عكس الألوان",
                           "للرسومات الفاتحة على خلفية داكنة", invertSwitch);
@@ -1166,7 +1205,6 @@ jobs:
                   g3.addView(invertRow.v);
                   g3.addView(divider());
 
-                  // إضافة 2: قلب أفقي
                   flipSwitch = makeSwitch("flip", false, true);
                   Row flipRow = makeRow("↔️", 0xFF5E5CE6, 0xFF3634A3, "قلب أفقي",
                           "يعكس الصورة يميناً ويساراً", flipSwitch);
@@ -1174,14 +1212,12 @@ jobs:
                   g3.addView(flipRow.v);
                   g3.addView(divider());
 
-                  // إضافة 3: تدوير الصورة 90 درجة
                   Row rotRow = makeRow("🔄", 0xFF0A84FF, 0xFF0040DD, "تدوير الصورة",
                           "90° مع عقارب الساعة", tv("‹", 24, 0x66FFFFFF, false));
                   pressable(rotRow.v, this::rotateImage);
                   g3.addView(rotRow.v);
                   g3.addView(divider());
 
-                  // إضافة 4: التباين
                   contrastValue = tv("", 14, TXT2, false);
                   contrastSeek = makeSeek(100, "contrast", 50, contrastValue,
                           p -> p == 50 ? "عادي" : (p > 50 ? "+" : "") + (p - 50), true);
@@ -1189,25 +1225,21 @@ jobs:
                   col.addView(g3);
                   animated.add(g3);
 
-                  // --- مجموعة: خيارات متقدمة (إضافات 5-8) ---
                   col.addView(sectionTitle("خيارات متقدمة"));
                   LinearLayout g4 = group();
 
-                  // إضافة 5: تجاهل الخطوط الصغيرة
                   minLenValue = tv("", 14, TXT2, false);
                   minLenSeek = makeSeek(60, "minlen", 0, minLenValue,
-                          p -> p == 0 ? "بدون" : p + " بكسل", false);
+                          p -> p == 0 ? "بدون (حفظ الكل)" : p + " بكسل", false);
                   g4.addView(sliderBlock("تجاهل الخطوط الصغيرة", minLenValue, minLenSeek));
                   g4.addView(divider());
 
-                  // إضافة 6: مهلة البدء قبل الرسم
                   startDelayValue = tv("", 14, TXT2, false);
                   startDelaySeek = makeSeek(10, "startdelay", 3, startDelayValue,
                           p -> (p * 0.5f) + " ث", false);
                   g4.addView(sliderBlock("مهلة البدء", startDelayValue, startDelaySeek));
                   g4.addView(divider());
 
-                  // إضافة 7: الرسم من الأعلى إلى الأسفل
                   topDownSwitch = makeSwitch("topdown", false, false);
                   Row topRow = makeRow("⬇️", 0xFF30D158, 0xFF248A3D, "الرسم من الأعلى للأسفل",
                           "ترتيب الخطوط حسب موقعها على اللوحة", topDownSwitch);
@@ -1215,7 +1247,6 @@ jobs:
                   g4.addView(topRow.v);
                   g4.addView(divider());
 
-                  // إضافة 8: اهتزاز عند انتهاء الرسم
                   vibrateSwitch = makeSwitch("vibrate", true, false);
                   Row vibRow = makeRow("📳", 0xFFFF9F0A, 0xFFD97700, "اهتزاز عند الانتهاء",
                           "تنبيه عند اكتمال الرسمة", vibrateSwitch);
@@ -1224,7 +1255,6 @@ jobs:
                   col.addView(g4);
                   animated.add(g4);
 
-                  // --- المعاينة ---
                   col.addView(sectionTitle("المعاينة"));
                   FrameLayout pv = new FrameLayout(this);
                   pv.setBackground(card(dp(24)));
@@ -1241,7 +1271,6 @@ jobs:
                   col.addView(pv, new LinearLayout.LayoutParams(-1, dp(280)));
                   animated.add(pv);
 
-                  // --- شريحتان: عدد الخطوط والزمن ---
                   LinearLayout chips = new LinearLayout(this);
                   chips.setOrientation(LinearLayout.HORIZONTAL);
                   strokesChip = chip("✎  —");
@@ -1266,7 +1295,6 @@ jobs:
                   tip.setPadding(dp(10), dp(10), dp(10), 0);
                   col.addView(tip);
 
-                  // --- شريط الزر السفلي الثابت ---
                   final FrameLayout bar = new FrameLayout(this);
                   GradientDrawable fade = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                           new int[]{0x00070B1E, 0xE6070B1E});
@@ -1279,7 +1307,6 @@ jobs:
                   bar.addView(startBtn, new FrameLayout.LayoutParams(-1, dp(58)));
                   root.addView(bar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
-                  // هوامش الشاشة (شريط الحالة وشريط التنقل)
                   root.setOnApplyWindowInsetsListener((v, ins) -> {
                       int top = ins.getSystemWindowInsetTop();
                       int bot = ins.getSystemWindowInsetBottom();
@@ -1291,7 +1318,6 @@ jobs:
                   setContentView(root);
                   root.requestApplyInsets();
 
-                  // دخول متدرّج ناعم للبطاقات
                   for (int i = 0; i < animated.size(); i++) {
                       View a = animated.get(i);
                       a.setAlpha(0f);
@@ -1315,7 +1341,6 @@ jobs:
                       i.removeExtra("paywall");
                       showCodeDialog(!License.canUse(this));
                   }
-                  // إضافة 9: استقبال صورة مُشاركة من المعرض أو أي تطبيق آخر
                   if (i != null && Intent.ACTION_SEND.equals(i.getAction())
                           && i.getType() != null && i.getType().startsWith("image/")) {
                       Uri shared = i.getParcelableExtra(Intent.EXTRA_STREAM);
@@ -1384,7 +1409,6 @@ jobs:
                   return t;
               }
 
-              /** نافذة منبثقة زجاجية: إدخال الرمز أو التواصل عبر واتساب */
               void showCodeDialog(boolean exhausted) {
                   if (codeDialog != null && codeDialog.isShowing()) return;
                   final Dialog d = new Dialog(this);
@@ -1507,7 +1531,6 @@ jobs:
                   startActivityForResult(i, 1);
               }
 
-              /** تدوير الصورة 90 درجة مع عقارب الساعة */
               void rotateImage() {
                   if (pixels == null) {
                       Toast.makeText(this, "اختر صورة أولاً", Toast.LENGTH_SHORT).show();
@@ -1530,7 +1553,6 @@ jobs:
                   return v < 0 ? 0 : Math.min(v, 255);
               }
 
-              /** تعديلات ما قبل الاستخراج: التباين، عكس الألوان، قلب أفقي (لا تغيّر الصورة الأصلية) */
               int[] adjust(int[] src, int w, int h, boolean invert, boolean flip, int contrastP) {
                   if (!invert && !flip && contrastP == 50) return src;
                   float f = (float) Math.pow(2.5, (contrastP - 50) / 50.0);
@@ -1561,16 +1583,16 @@ jobs:
                   return len;
               }
 
-              /** إزالة الخطوط الأقصر من الحد المختار (خطوط التعبئة لا تُمسّ) */
-              List<float[]> filterStrokes(Tracer.Result r) {
+              List<Tracer.StrokeItem> filterItems(Tracer.Result r) {
                   int min = minLenSeek.getProgress();
-                  if (min <= 0) return r.strokes;
-                  List<float[]> out = new ArrayList<>();
-                  for (int i = 0; i < r.strokes.size(); i++) {
-                      float[] s = r.strokes.get(i);
-                      if (i < r.fillCount || strokeLen(s) >= min) out.add(s);
+                  List<Tracer.StrokeItem> out = new ArrayList<>();
+                  for (int i = 0; i < r.items.size(); i++) {
+                      Tracer.StrokeItem it = r.items.get(i);
+                      if (min <= 0 || i < r.fillCount || strokeLen(it.pts) >= min) {
+                          out.add(it);
+                      }
                   }
-                  return out.isEmpty() ? r.strokes : out;
+                  return out.isEmpty() ? r.items : out;
               }
 
               float currentSpeed() {
@@ -1600,7 +1622,7 @@ jobs:
                       try (InputStream in = getContentResolver().openInputStream(uri)) {
                           full = BitmapFactory.decodeStream(in, null, o);
                       }
-                      float k = Math.min(3f, 720f / Math.max(full.getWidth(), full.getHeight()));
+                      float k = Math.min(3f, 900f / Math.max(full.getWidth(), full.getHeight()));
                       pw = Math.max(16, (int) (full.getWidth() * k));
                       ph = Math.max(16, (int) (full.getHeight() * k));
                       Bitmap scaled = Bitmap.createScaledBitmap(full, pw, ph, true);
@@ -1663,9 +1685,10 @@ jobs:
                   p.setAntiAlias(true);
                   p.setStrokeCap(Paint.Cap.ROUND);
                   float fw = Math.max(2f, r.fillW * sc * 1.1f);
-                  for (int si = 0; si < r.strokes.size(); si++) {
-                      float[] s = r.strokes.get(si);
-                      p.setStrokeWidth(si < r.fillCount ? fw : 2f);
+                  for (int si = 0; si < r.items.size(); si++) {
+                      Tracer.StrokeItem it = r.items.get(si);
+                      float[] s = it.pts;
+                      p.setStrokeWidth(si < r.fillCount ? fw : (it.repeats >= 2 ? 3.2f : 1.8f));
                       for (int k = 2; k < s.length; k += 2) {
                           cv.drawLine(s[k - 2] * sc + 4, s[k - 1] * sc + 4, s[k] * sc + 4, s[k + 1] * sc + 4, p);
                       }
@@ -1680,11 +1703,11 @@ jobs:
                       info.setText("الأقل = أبطأ في سرعة الرسم");
                       return;
                   }
-                  int secs = (int) (result.totalLen * 1.5f / sp);
+                  int secs = (int) (result.totalLen * 1.35f / sp);
                   String t = secs >= 60 ? (secs / 60) + " دقيقة" : secs + " ثانية";
-                  strokesChip.setText("✎  " + result.strokes.size() + " خط");
+                  strokesChip.setText("✎  " + result.totalRepeats + " ضربة");
                   timeChip.setText("⏱  ≈ " + t);
-                  info.setText("اضغط على المعاينة لتغيير الصورة");
+                  info.setText("الداكن ×2 · الرفيع ×1 · اضغط على المعاينة لتغيير الصورة");
               }
 
               void start() {
@@ -1692,7 +1715,7 @@ jobs:
                       showCodeDialog(true);
                       return;
                   }
-                  if (result == null || result.strokes.isEmpty()) {
+                  if (result == null || result.items.isEmpty()) {
                       Toast.makeText(this, "اختر صورة أولاً", Toast.LENGTH_SHORT).show();
                       return;
                   }
@@ -1701,7 +1724,7 @@ jobs:
                       startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                       return;
                   }
-                  DrawService.strokes = filterStrokes(result);
+                  DrawService.strokeItems = filterItems(result);
                   DrawService.imgW = result.w;
                   DrawService.imgH = result.h;
                   DrawService.speed = currentSpeed();
@@ -1750,25 +1773,24 @@ jobs:
           import android.widget.TextView;
           import android.widget.Toast;
           import java.util.ArrayList;
-          import java.util.Arrays;
           import java.util.List;
           import java.util.Locale;
           import java.util.Random;
 
           public class DrawService extends AccessibilityService {
               static DrawService instance;
-              static List<float[]> strokes;
+              static List<Tracer.StrokeItem> strokeItems;
               static float imgW, imgH;
               static float speed = 160f;
               static boolean human = true;
-              static boolean topDown = false;          // الرسم من الأعلى إلى الأسفل
-              static boolean vibrateOnFinish = true;   // اهتزاز عند انتهاء الرسم
-              static long startDelayMs = 1500;         // مهلة ما قبل البدء
+              static boolean topDown = false;
+              static boolean vibrateOnFinish = true;
+              static long startDelayMs = 1500;
 
               static class Piece {
                   float[] pts;
                   long dur;
-                  long pause; // عشوائية بشرية تُضاف فوق مدة التأخير التي يحددها المستخدم
+                  long pause;
               }
               List<Piece> plan;
 
@@ -1786,8 +1808,8 @@ jobs:
               boolean drawing, cancel, paused, loopWaiting;
               int resumeIdx;
               int okCount, failCount;
-              int delayMs = 150;      // التأخير بين الضغطات (ملي ثانية)
-              RectF region;           // موقع الرسمة المحدد (إحداثيات الشاشة)
+              int delayMs = 150;
+              RectF region;
 
               @Override
               protected void onServiceConnected() {
@@ -1810,7 +1832,6 @@ jobs:
                   return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
               }
 
-              // ============ ستايل زجاجي (Liquid Glass) ============
               Drawable glass(float radius, boolean strong, int sheenBottomInset) {
                   GradientDrawable base = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
                           strong ? new int[]{0xB8363644, 0x9C1E1E28} : new int[]{0x45FFFFFF, 0x1FFFFFFF});
@@ -1850,7 +1871,6 @@ jobs:
                   return p;
               }
 
-              // ============ إدارة النوافذ ============
               void hideAll() {
                   removePaywall();
                   removeFrame();
@@ -1926,7 +1946,6 @@ jobs:
                   wm.addView(fab, fabLp);
               }
 
-              // ============ الضغط على الزر العائم ============
               void onFabClick() {
                   if (pendingBegin != null) {
                       h.removeCallbacks(pendingBegin);
@@ -1937,7 +1956,6 @@ jobs:
                   }
                   if (menu != null) { closeMenu(); return; }
                   if (regionOverlay != null) return;
-                  // فتح القائمة أثناء الرسم يوقفه مؤقتاً حتى لا تصطدم لمسات الرسم بالقائمة
                   if (drawing && !paused) {
                       paused = true;
                       setFab("⏸", 24);
@@ -1945,7 +1963,6 @@ jobs:
                   openMenu();
               }
 
-              // ============ القائمة العائمة ============
               String delayText(int ms) {
                   return "⏱ التأخير بين الضغطات: " + String.format(Locale.US, "%.2f", ms / 1000f) + " ث";
               }
@@ -1958,7 +1975,6 @@ jobs:
                   m.setPadding(dp(14), dp(14), dp(14), dp(14));
                   m.setBackground(glass(dp(28), true, dp(60)));
 
-                  // 1) تشغيل / إكمال  +  إيقاف مؤقت
                   LinearLayout row = new LinearLayout(this);
                   row.setOrientation(LinearLayout.HORIZONTAL);
                   TextView play = btn((drawing && paused) ? "▶ إكمال الرسم" : "▶ تشغيل الرسم", 0xFF30D158);
@@ -1975,7 +1991,6 @@ jobs:
                       m.addView(stop, lpw(0, dp(3), dp(8), dp(3), 0));
                   }
 
-                  // 2) مدة التأخير بين الضغطات
                   final TextView dl = new TextView(this);
                   dl.setTextColor(Color.WHITE);
                   dl.setTextSize(13);
@@ -1983,7 +1998,7 @@ jobs:
                   dl.setPadding(dp(4), dp(14), dp(4), dp(2));
                   m.addView(dl, lpw(0, 0, 0, 0, 0));
                   SeekBar sb = new SeekBar(this);
-                  sb.setMax(60); // 0 → 3 ثوانٍ بخطوة 50 مللي ثانية
+                  sb.setMax(60);
                   sb.setProgress(delayMs / 50);
                   sb.setProgressTintList(ColorStateList.valueOf(0xFF0A84FF));
                   sb.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
@@ -1999,7 +2014,6 @@ jobs:
                   });
                   m.addView(sb, lpw(0, 0, 0, 0, 0));
 
-                  // 3) تحديد موقع الرسمة
                   TextView loc = btn("📐 تحديد موقع الرسمة" + (region != null ? "  ✓" : ""), Color.WHITE);
                   loc.setOnClickListener(v -> {
                       if (drawing) {
@@ -2011,7 +2025,6 @@ jobs:
                   });
                   m.addView(loc, lpw(0, dp(3), dp(10), dp(3), 0));
 
-                  // إغلاق عند الضغط خارج القائمة (إلا على الزر نفسه)
                   m.setOnTouchListener((v, e) -> {
                       if (e.getAction() == MotionEvent.ACTION_OUTSIDE) {
                           float rx = e.getRawX(), ry = e.getRawY();
@@ -2056,7 +2069,6 @@ jobs:
                   menu = null;
               }
 
-              // ============ أوامر القائمة ============
               void onPlay() {
                   if (drawing) {
                       closeMenu();
@@ -2075,7 +2087,7 @@ jobs:
                       showPaywall();
                       return;
                   }
-                  if (strokes == null || strokes.isEmpty()) {
+                  if (strokeItems == null || strokeItems.isEmpty()) {
                       Toast.makeText(this, "اختر صورة من التطبيق أولاً", Toast.LENGTH_LONG).show();
                       return;
                   }
@@ -2107,7 +2119,6 @@ jobs:
                   }
               }
 
-              // ============ تحديد موقع الرسمة ============
               class RegionView extends View {
                   final RectF r = new RectF();
                   final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -2119,7 +2130,7 @@ jobs:
                   final float hr = dp(11);
                   final int sw = getResources().getDisplayMetrics().widthPixels;
                   final int sh = getResources().getDisplayMetrics().heightPixels;
-                  int drag = -1; // 0=يسار-أعلى 1=يمين-أعلى 2=يمين-أسفل 3=يسار-أسفل 4=تحريك
+                  int drag = -1;
                   float lx, ly;
 
                   RegionView(Context c, RectF init) {
@@ -2294,7 +2305,6 @@ jobs:
                   regionView = null;
               }
 
-              // ============ نافذة الاشتراك المنبثقة ============
               void showPaywall() {
                   if (paywall != null || wm == null) return;
                   FrameLayout root = new FrameLayout(this);
@@ -2370,7 +2380,6 @@ jobs:
                   paywall = null;
               }
 
-              // ============ بدء الرسم ============
               void prepareStart() {
                   final float x1 = region.left, y1 = region.top, y2 = region.bottom;
                   float rw = region.width(), rh = region.height();
@@ -2381,7 +2390,6 @@ jobs:
                   final float sc = Math.min(rw / imgW, rh / imgH);
                   final float ox = x1 + (rw - imgW * sc) / 2f;
                   final float oy = y1 + (rh - imgH * sc) / 2f;
-                  // إطار أحمر يوضح مكان الرسم قبل البدء (اضغط الزر لإلغاء إن كان المكان خاطئاً)
                   showFrame(ox, oy, imgW * sc, imgH * sc);
                   setFab("إلغاء", 11);
                   pendingBegin = () -> {
@@ -2432,7 +2440,6 @@ jobs:
                   failCount = 0;
                   if (fab != null) {
                       setFab("✎", 22);
-                      // ننقل الزر خارج اللوحة حتى لا تصطدم به لمسات الرسم
                       int size = fabLp.width;
                       int screenH = getResources().getDisplayMetrics().heightPixels;
                       int ny = (int) y2 + 15;
@@ -2452,74 +2459,46 @@ jobs:
                   return len;
               }
 
-              /** يحوّل الخطوط إلى ضربات قلم؛ في الوضع البشري: سرعات متغيرة، اهتزاز يد خفيف، رفع قلم وتوقفات طبيعية. */
+              /** يحوّل الخطوط إلى ضربات دون ترك الخطوط، ويكرر الداكن مرتين والرفيع مرة واحدة */
               List<Piece> buildPlan(float ox, float oy, float sc) {
                   Random rnd = new Random();
-                  List<float[]> screen = new ArrayList<>();
-                  for (float[] s : strokes) {
-                      float[] t = new float[s.length];
-                      for (int k = 0; k < s.length; k += 2) {
-                          t[k] = ox + (s[k] + 0.5f) * sc;
-                          t[k + 1] = oy + (s[k + 1] + 0.5f) * sc;
-                      }
-                      screen.add(t);
-                  }
+                  List<Tracer.StrokeItem> ordered = new ArrayList<>(strokeItems);
                   if (topDown) {
-                      screen.sort((a, b) -> Float.compare(a[1], b[1]));
+                      ordered.sort((a, b) -> Float.compare(a.pts[1], b.pts[1]));
                   }
-                  if (human) {
-                      // الإنسان يرسم الخطوط العامة الطويلة أولاً ثم التفاصيل
-                      List<float[]> big = new ArrayList<>();
-                      List<float[]> small = new ArrayList<>();
-                      for (float[] t : screen) {
-                          if (length(t) >= 120f) big.add(t); else small.add(t);
-                      }
-                      screen = big;
-                      screen.addAll(small);
-                  }
+
                   List<Piece> out = new ArrayList<>();
                   float drift = 1f, wx = 0, wy = 0;
-                  for (float[] t : screen) {
-                      float len = length(t);
-                      if (len < 2f) continue;
-                      float[] pts = t;
-                      if (human) {
-                          pts = t.clone();
-                          for (int k = 0; k < pts.length; k += 2) {
-                              wx = 0.75f * wx + 0.25f * (float) rnd.nextGaussian() * 1.1f;
-                              wy = 0.75f * wy + 0.25f * (float) rnd.nextGaussian() * 1.1f;
-                              pts[k] += wx;
-                              pts[k + 1] += wy;
+
+                  for (Tracer.StrokeItem it : ordered) {
+                      float[] basePts = new float[it.pts.length];
+                      for (int k = 0; k < it.pts.length; k += 2) {
+                          basePts[k] = ox + (it.pts[k] + 0.5f) * sc;
+                          basePts[k + 1] = oy + (it.pts[k + 1] + 0.5f) * sc;
+                      }
+                      float len = length(basePts);
+                      if (len < 1.5f) continue;
+
+                      int reps = Math.max(1, it.repeats);
+                      for (int rep = 0; rep < reps; rep++) {
+                          float[] pts = basePts.clone();
+                          if (human) {
+                              for (int k = 0; k < pts.length; k += 2) {
+                                  wx = 0.7f * wx + 0.3f * (float) rnd.nextGaussian() * 0.7f;
+                                  wy = 0.7f * wy + 0.3f * (float) rnd.nextGaussian() * 0.7f;
+                                  pts[k] += wx;
+                                  pts[k + 1] += wy;
+                              }
                           }
-                      }
-                      List<float[]> parts = new ArrayList<>();
-                      int n = pts.length / 2;
-                      if (human && len > 220f && n >= 6 && rnd.nextFloat() < 0.6f) {
-                          int cut = 2 + rnd.nextInt(n - 4);
-                          parts.add(Arrays.copyOfRange(pts, 0, 2 * (cut + 1)));
-                          parts.add(Arrays.copyOfRange(pts, 2 * cut, pts.length));
-                      } else {
-                          parts.add(pts);
-                      }
-                      for (int pi = 0; pi < parts.size(); pi++) {
-                          float[] q = parts.get(pi);
-                          float ql = length(q);
-                          if (ql < 2f) continue;
                           Piece pc = new Piece();
-                          pc.pts = q;
+                          pc.pts = pts;
                           float sp = speed;
                           if (human) {
-                              drift = Math.max(0.75f, Math.min(1.3f, drift + (rnd.nextFloat() - 0.5f) * 0.15f));
-                              sp = speed * drift * (0.8f + rnd.nextFloat() * 0.45f);
+                              drift = Math.max(0.85f, Math.min(1.2f, drift + (rnd.nextFloat() - 0.5f) * 0.1f));
+                              sp = speed * drift * (0.85f + rnd.nextFloat() * 0.3f);
                           }
-                          pc.dur = (long) Math.max(150f, Math.min(59000f, ql / sp * 1000f));
-                          if (human) {
-                              pc.pause = rnd.nextInt(350);
-                              if (rnd.nextFloat() < 0.07f) pc.pause += 1200 + rnd.nextInt(1800);
-                              if (pi == 0 && parts.size() > 1) pc.pause = rnd.nextInt(60);
-                          } else {
-                              pc.pause = 0;
-                          }
+                          pc.dur = (long) Math.max(140f, Math.min(59000f, len / sp * 1000f));
+                          pc.pause = human ? (25 + rnd.nextInt(120)) : 0;
                           out.add(pc);
                       }
                   }
@@ -2541,7 +2520,6 @@ jobs:
                   setFab(okCount + "✓\n" + failCount + "✗", 11);
                   if (vibrateOnFinish && msg.startsWith("انتهى")) buzz();
                   Toast.makeText(this, msg + "  (نجح " + okCount + " / فشل " + failCount + ")", Toast.LENGTH_LONG).show();
-                  // انتهت المحاولات المجانية: تظهر النافذة المنبثقة
                   if (!License.canUse(this)) h.postDelayed(this::showPaywall, 1500);
               }
 
@@ -2556,7 +2534,6 @@ jobs:
               void drawPiece(int i) {
                   if (cancel) { finishDraw("تم الإيقاف"); return; }
                   if (paused) {
-                      // نتوقف هنا ونحفظ مكاننا؛ عند "إكمال" نكمل من نفس الضربة
                       resumeIdx = i;
                       loopWaiting = true;
                       return;
